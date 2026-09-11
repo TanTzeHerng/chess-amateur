@@ -5,10 +5,26 @@ Uses only the Python standard library (http.server) plus python-chess. No
 external web framework. python-chess is the single source of truth for board
 state, move legality, SAN, FEN, and result detection.
 
+STATELESS DESIGN (survives multiple workers / process restarts):
+  The authoritative game state is carried by the CLIENT as an ordered list of
+  UCI moves ("moves"). The server never depends on its own memory to serve a
+  move: it rebuilds the position by replaying the client-supplied moves onto a
+  fresh chess.Board, using python-chess as the single source of truth. This is
+  what makes the app correct on hosts like Render, where the process that
+  served POST /api/new is not guaranteed to be the one serving a later
+  POST /api/move (multiple workers, cold starts, recycles). A "game_id" is
+  still issued for display/compatibility, but it is NON-authoritative; the
+  in-memory GAMES dict is only a best-effort cache and correctness never
+  depends on an entry being present.
+
 Endpoints:
   POST /api/new    body {"human_color": "white"|"black", "threads": 1..128?}
-  POST /api/move   body {"game_id": ..., "move": "e2e4"}
-  GET  /api/state?game_id=...
+  POST /api/move   body {"moves": ["e2e4", ...], "move": "e7e5",
+                         "human_color": "white"|"black", "threads": 1..128?,
+                         "game_id": ...?}
+                   ("moves" is the authoritative history so far; "move" is the
+                    new human move to apply. "game_id" is optional/display-only.)
+  GET  /api/state?game_id=...   (best-effort; rebuilds from cache if present)
   GET  /            -> static/index.html
   GET  /<path>      -> static/<path>
 
@@ -153,25 +169,85 @@ def _engine_move(board, threads=None):
     return uci, san
 
 
-def _state_dict(game, last_bot_move=None):
-    board = game["board"]
+class InvalidMoveHistory(ValueError):
+    """Raised when a client-supplied move list cannot be legally replayed."""
+
+
+def _rebuild_board(moves):
+    """Replay a client-supplied list of UCI moves onto a fresh board.
+
+    python-chess is the single source of truth: every move must be a legal
+    continuation of the game, otherwise the whole history is rejected. Returns
+    (board, san_history, moves_uci) where san_history is regenerated
+    server-side (client SAN is never trusted) and moves_uci is the normalized
+    UCI list actually applied.
+
+    A missing/empty list yields the starting position. This is what lets a
+    fresh server process (empty memory) reconstruct any game authoritatively.
+    """
+    board = chess.Board()
+    san_history = []
+    moves_uci = []
+    if not moves:
+        return board, san_history, moves_uci
+    if not isinstance(moves, (list, tuple)):
+        raise InvalidMoveHistory("moves must be a list of UCI strings")
+    for raw in moves:
+        try:
+            move = chess.Move.from_uci(str(raw))
+        except (ValueError, TypeError):
+            raise InvalidMoveHistory("invalid move in history: %r" % (raw,))
+        if move not in board.legal_moves:
+            raise InvalidMoveHistory("illegal move in history: %r" % (raw,))
+        san_history.append(board.san(move))
+        board.push(move)
+        moves_uci.append(move.uci())
+    return board, san_history, moves_uci
+
+
+def _state_dict(board, human_color, threads, san_history, moves_uci,
+                game_id=None, last_bot_move=None):
+    """Serialize a game position into the API state shape.
+
+    Built purely from primitives (board + carried metadata) so it never
+    depends on the in-memory GAMES store. `moves` is the authoritative UCI
+    history the client must echo back on the next /api/move.
+    """
     game_over = board.is_game_over(claim_draw=True)
     result = board.result(claim_draw=True) if game_over else None
     return {
-        "game_id": game["game_id"],
+        "game_id": game_id,
         "fen": board.fen(),
-        "human_color": game["human_color"],
-        "threads": game.get("threads", DEFAULT_GAME_THREADS),
+        "human_color": human_color,
+        "threads": threads,
         "turn": _turn_str(board),
         "legal_moves": _legal_moves(board),
         "status": _status(board),
-        "san_history": list(game["san_history"]),
+        "san_history": list(san_history),
+        "moves": list(moves_uci),
         "bot_name": BOT_NAME,
         "last_bot_move": last_bot_move,
         "game_over": game_over,
         "result": result,
         "result_reason": _result_reason(board) if game_over else None,
     }
+
+
+def _cache_game(game_id, board, human_color, threads, san_history, moves_uci):
+    """Best-effort, NON-authoritative cache of a game by id. Correctness never
+    depends on this; it exists only so GET /api/state can answer quickly when
+    the same process is hit again."""
+    if not game_id:
+        return
+    with GAMES_LOCK:
+        GAMES[game_id] = {
+            "game_id": game_id,
+            "board": board,
+            "human_color": human_color,
+            "threads": threads,
+            "san_history": list(san_history),
+            "moves": list(moves_uci),
+        }
 
 
 # -- request handler -------------------------------------------------------
@@ -237,37 +313,41 @@ class Handler(BaseHTTPRequestHandler):
 
         game_id = str(uuid.uuid4())
         board = chess.Board()
-        game = {
-            "game_id": game_id,
-            "board": board,
-            "human_color": human_color,
-            "san_history": [],
-            "threads": threads,
-        }
+        san_history = []
+        moves_uci = []
 
         last_bot_move = None
         # If the human is Black, Chess Amateur (White) moves first.
         if human_color == "black" and not board.is_game_over(claim_draw=True):
             uci, san = _engine_move(board, threads=threads)
             if uci:
-                game["san_history"].append(san)
+                san_history.append(san)
+                moves_uci.append(uci)
                 last_bot_move = {"uci": uci, "san": san}
 
-        with GAMES_LOCK:
-            GAMES[game_id] = game
-        return self._send_json(_state_dict(game, last_bot_move=last_bot_move))
+        # Best-effort cache only; the client carries the authoritative moves.
+        _cache_game(game_id, board, human_color, threads, san_history, moves_uci)
+        return self._send_json(_state_dict(
+            board, human_color, threads, san_history, moves_uci,
+            game_id=game_id, last_bot_move=last_bot_move))
 
     def _handle_move(self):
         body = self._read_json_body()
         game_id = body.get("game_id")
         move_uci = body.get("move")
+        human_color = str(body.get("human_color", "white")).lower()
+        if human_color not in ("white", "black"):
+            human_color = "white"
+        threads = _coerce_threads(body.get("threads"))
 
-        with GAMES_LOCK:
-            game = GAMES.get(game_id)
-        if game is None:
-            return self._send_error_json("unknown game_id", status=404)
+        # STATELESS: rebuild the authoritative position by replaying the
+        # client-supplied move history onto a fresh board. This works even if
+        # this process has never seen this game (multiple workers / restarts).
+        try:
+            board, san_history, moves_uci = _rebuild_board(body.get("moves"))
+        except InvalidMoveHistory:
+            return self._send_error_json("invalid move history", status=400)
 
-        board = game["board"]
         if board.is_game_over(claim_draw=True):
             return self._send_error_json("game is over", status=400)
 
@@ -282,17 +362,23 @@ class Handler(BaseHTTPRequestHandler):
         # Apply human move (record SAN before pushing).
         human_san = board.san(move)
         board.push(move)
-        game["san_history"].append(human_san)
+        san_history.append(human_san)
+        moves_uci.append(move.uci())
 
         # Chess Amateur replies if the game continues.
         last_bot_move = None
         if not board.is_game_over(claim_draw=True):
-            uci, san = _engine_move(board, threads=game.get("threads"))
+            uci, san = _engine_move(board, threads=threads)
             if uci:
-                game["san_history"].append(san)
+                san_history.append(san)
+                moves_uci.append(uci)
                 last_bot_move = {"uci": uci, "san": san}
 
-        return self._send_json(_state_dict(game, last_bot_move=last_bot_move))
+        # Refresh the best-effort cache (still non-authoritative).
+        _cache_game(game_id, board, human_color, threads, san_history, moves_uci)
+        return self._send_json(_state_dict(
+            board, human_color, threads, san_history, moves_uci,
+            game_id=game_id, last_bot_move=last_bot_move))
 
     def _handle_state(self, query):
         game_id_list = query.get("game_id")
@@ -301,7 +387,11 @@ class Handler(BaseHTTPRequestHandler):
             game = GAMES.get(game_id)
         if game is None:
             return self._send_error_json("unknown game_id", status=404)
-        return self._send_json(_state_dict(game))
+        return self._send_json(_state_dict(
+            game["board"], game["human_color"],
+            game.get("threads", DEFAULT_GAME_THREADS),
+            game["san_history"], game.get("moves", []),
+            game_id=game_id))
 
     # -- static files --
     def _serve_static(self, path):
