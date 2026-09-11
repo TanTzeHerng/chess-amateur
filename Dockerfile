@@ -7,8 +7,17 @@ FROM --platform=linux/amd64 python:3.11-slim
 
 # --- Download the Stockfish engine at build time -------------------------
 # Fetch an official Stockfish release and place the binary at a stable path.
-# Using the AVX2 build which runs on typical cloud CPUs (incl. Render).
-ARG STOCKFISH_URL=https://github.com/official-stockfish/Stockfish/releases/download/sf_17/stockfish-ubuntu-x86-64-avx2.tar
+#
+# We deliberately use the GENERIC x86-64 build (`stockfish-ubuntu-x86-64.tar`),
+# NOT the AVX2/BMI2 variant. The optimized builds contain CPU instructions
+# (AVX2, etc.) that not every cloud host supports; on such a host the binary
+# dies instantly with SIGILL on launch, the engine never starts, and a move
+# request hangs -> the platform proxy returns a 502 with nothing in the logs
+# (exactly the failure seen on Render). The generic build runs on ANY 64-bit
+# x86 CPU. Because Chess Amateur searches at depth 1, the CPU-optimization
+# level is irrelevant to move quality/speed, so the generic build costs us
+# nothing while eliminating SIGILL-on-launch.
+ARG STOCKFISH_URL=https://github.com/official-stockfish/Stockfish/releases/download/sf_17/stockfish-ubuntu-x86-64.tar
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends curl ca-certificates xz-utils; \
@@ -21,7 +30,13 @@ RUN set -eux; \
     cp "$bin" /usr/local/bin/stockfish; \
     chmod +x /usr/local/bin/stockfish; \
     rm -rf /tmp/stockfish.tar /tmp/sf; \
-    /usr/local/bin/stockfish --help >/dev/null 2>&1 || true
+    # STRICT smoke test: actually EXECUTE the binary and require a real UCI
+    # handshake. If the binary cannot run on this platform (SIGILL, missing
+    # instructions, corrupt download), 'uciok' will be absent and the build
+    # FAILS here instead of shipping a broken engine that only fails at
+    # runtime with an unexplained 502.
+    printf 'uci\nquit\n' | /usr/local/bin/stockfish | grep -q '^uciok$'; \
+    echo "Stockfish smoke test passed: uciok received from generic x86-64 build"
 
 # --- Application ---------------------------------------------------------
 WORKDIR /app
