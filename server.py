@@ -38,7 +38,9 @@ Run: python3 chess_amateur/server.py
 """
 import json
 import os
+import sys
 import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -50,6 +52,19 @@ from engine import ChessAmateurEngine, DEFAULT_THREADS, EngineUnavailable
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
 BOT_NAME = "Chess Amateur"
+
+
+def log(msg):
+    """Write a timestamped log line to stdout and FLUSH immediately.
+
+    In a container Python's stdout is block-buffered, so bare print() output
+    can sit unflushed and never reach the platform's log collector (observed
+    on Render: build logs present, zero application logs). Flushing on every
+    line guarantees the platform captures startup + per-request logs so a
+    failing move is diagnosable instead of invisible.
+    """
+    sys.stdout.write("[%s] %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
+    sys.stdout.flush()
 
 # Allowed range for the Stockfish "Threads" option (per game).
 MIN_THREADS = 1
@@ -256,8 +271,10 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "ChessAmateur/1.0"
 
     def log_message(self, fmt, *args):
-        # Keep logs concise but present.
-        print("%s - %s" % (self.address_string(), fmt % args))
+        # Route request logs through the flushed logger so they reach the
+        # platform log collector (default BaseHTTPRequestHandler writes to an
+        # unflushed stderr stream).
+        log("%s - %s" % (self.address_string(), fmt % args))
 
     # -- helpers --
     def _send_json(self, obj, status=200):
@@ -284,6 +301,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/healthz":
+            # Cheap liveness probe (no engine call) for platform health checks
+            # and manual reachability testing.
+            return self._send_json({"status": "ok", "bot": BOT_NAME})
         if path == "/api/state":
             return self._handle_state(parse_qs(parsed.query))
         if path.startswith("/api/"):
@@ -300,10 +321,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._handle_move()
         except json.JSONDecodeError:
             return self._send_error_json("invalid JSON body", status=400)
-        except EngineUnavailable:
+        except EngineUnavailable as exc:
             # The Stockfish engine failed to start or respond (e.g. an
             # incompatible binary that dies on launch). Fail FAST with a clear
             # 500 instead of hanging until the platform proxy times out (502).
+            log("ENGINE UNAVAILABLE on %s: %s" % (path, exc))
             return self._send_error_json("engine unavailable", status=500)
         return self._send_error_json("not found", status=404)
 
@@ -373,11 +395,18 @@ class Handler(BaseHTTPRequestHandler):
         # Chess Amateur replies if the game continues.
         last_bot_move = None
         if not board.is_game_over(claim_draw=True):
+            log("move: human %s (history=%d plies, threads=%d) -> asking engine"
+                % (move.uci(), len(moves_uci), threads))
+            t0 = time.monotonic()
             uci, san = _engine_move(board, threads=threads)
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
             if uci:
                 san_history.append(san)
                 moves_uci.append(uci)
                 last_bot_move = {"uci": uci, "san": san}
+                log("move: engine replied %s (%s) in %d ms" % (uci, san, elapsed_ms))
+            else:
+                log("move: engine returned no move in %d ms" % elapsed_ms)
 
         # Refresh the best-effort cache (still non-authoritative).
         _cache_game(game_id, board, human_color, threads, san_history, moves_uci)
@@ -430,8 +459,11 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     port = int(os.environ.get("PORT", "8000"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print("%s server running at http://localhost:%d (default threads: %d)"
-          % (BOT_NAME, port, DEFAULT_GAME_THREADS))
+    log("%s server starting on 0.0.0.0:%d" % (BOT_NAME, port))
+    log("engine binary: %s" % ENGINE.path)
+    log("default threads: %d (SF_THREADS=%s)"
+        % (DEFAULT_GAME_THREADS, os.environ.get("SF_THREADS", "<unset>")))
+    log("ready: open http://localhost:%d/  (health: /healthz)" % port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
