@@ -5,18 +5,29 @@ The bot is Stockfish restricted to a very shallow search (depth 1) but with a
 large thread count (128), matching the proven invocation in
 /projects/sandbox/sf_move.py.
 
-CRITICAL HONESTY CONSTRAINT (inherited from sf_move.py):
-  Only the bestmove (UCI) is ever returned. All 'info' lines carrying
-  Stockfish's principal variation and evaluation score are intentionally
-  ignored so the human opponent never sees the engine's analysis.
+PLAYER-FACING HONESTY CONSTRAINT (unchanged):
+  best_move() still returns ONLY the bestmove (UCI) to the server/API/UI. The
+  human opponent NEVER sees Stockfish's principal variation or evaluation
+  score through the app.
+
+OPERATOR TELEMETRY (added):
+  For engine testing/observability, the FULL raw UCI output of each search
+  (every 'info' line carrying depth/score/PV/nodes, plus the final 'bestmove')
+  is logged to STDOUT so it is captured by the platform's server logs
+  (e.g. Render). This telemetry lives only in the server logs the operator
+  sees; it is never sent to the browser, so the player-facing constraint above
+  still holds. Set SF_LOG_UCI=0 to disable this logging.
 
 Configuration via environment:
   STOCKFISH_PATH  path to the Stockfish binary
                   (default: /projects/sandbox/stockfish/stockfish-linux-x86-64-universal)
+  SF_LOG_UCI      "1" (default) to log full UCI search output to server logs;
+                  "0" to disable.
 """
 import os
 import select
 import subprocess
+import sys
 import threading
 import time
 
@@ -31,6 +42,28 @@ DEFAULT_THREADS = 128
 # clear RuntimeError rather than blocking forever on readline().
 HANDSHAKE_TIMEOUT = float(os.environ.get("SF_HANDSHAKE_TIMEOUT", "10"))
 SEARCH_TIMEOUT = float(os.environ.get("SF_SEARCH_TIMEOUT", "30"))
+
+# Operator telemetry: log the full raw UCI search output (info + bestmove) to
+# stdout so the platform's server logs capture it. Never sent to the player.
+LOG_UCI = os.environ.get("SF_LOG_UCI", "1") != "0"
+
+
+def _uci_log(line):
+    """Write one raw UCI line to stdout (server logs), timestamped + flushed.
+
+    This is operator-only telemetry captured by the platform's log collector
+    (e.g. Render). It is NEVER returned to the API/UI, so the player still
+    cannot see Stockfish's analysis. Flushed because container stdout is
+    block-buffered and would otherwise not reach the log collector.
+    """
+    if not LOG_UCI:
+        return
+    try:
+        sys.stdout.write("[%s] SF| %s\n"
+                         % (time.strftime("%Y-%m-%d %H:%M:%S"), line))
+        sys.stdout.flush()
+    except Exception:
+        pass
 
 
 class EngineUnavailable(RuntimeError):
@@ -225,15 +258,24 @@ class ChessAmateurEngine:
         self._send(proc, "isready")
         self._read_until(proc, "readyok", timeout=HANDSHAKE_TIMEOUT)
         self._send(proc, "position fen %s" % fen)
+        _uci_log("position fen %s" % fen)
         self._send(proc, "go depth %d" % self.depth)
+        _uci_log("go depth %d" % self.depth)
 
         deadline = time.monotonic() + SEARCH_TIMEOUT
         bestmove = None
         while True:
             line = self._readline_bounded(proc, deadline)
             line = line.strip()
-            # ONLY the bestmove line matters. 'info' lines (PV + eval) are
-            # intentionally ignored and never returned.
+            if not line:
+                continue
+            # OPERATOR TELEMETRY: log every raw UCI line (info lines carrying
+            # depth/score/PV/nodes, and the final bestmove) to the server logs.
+            # This is captured by the platform (e.g. Render) for the operator
+            # only; it is never returned to the API/UI below.
+            _uci_log(line)
+            # PLAYER-FACING: only the bestmove is ever RETURNED. 'info' lines
+            # (PV + eval) are logged above but never surfaced to the player.
             if line.startswith("bestmove"):
                 parts = line.split()
                 if len(parts) >= 2:
