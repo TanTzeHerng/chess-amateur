@@ -154,9 +154,64 @@ def test_single_process_invariant_across_respawn():
         eng.close()
 
 
+def test_engine_fails_fast_when_binary_broken():
+    """A binary that exits immediately must make best_move raise PROMPTLY
+    (bounded time) instead of hanging forever on readline().
+
+    This is the regression guard for the Render 502: an incompatible binary
+    that dies on launch (SIGILL) used to leave the unbounded readline() loop
+    blocking until the platform proxy timed out. Now the bounded/fail-fast
+    reads raise EngineUnavailable quickly.
+    """
+    from engine import EngineUnavailable
+    start = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    # /bin/false exits immediately with status 1 and never speaks UCI.
+    eng = ChessAmateurEngine(path="/bin/false", threads=1)
+    try:
+        t0 = time.monotonic()
+        raised = False
+        try:
+            eng.best_move(start)
+        except EngineUnavailable:
+            raised = True
+        elapsed = time.monotonic() - t0
+        assert raised, "best_move should raise EngineUnavailable for a broken binary"
+        # Must fail fast, not hang. The handshake happens on a dead process so
+        # this returns near-instantly (poll() != None); allow generous slack.
+        assert elapsed < 15, "best_move took too long to fail fast: %.1fs" % elapsed
+        print("PASS engine fails fast on broken binary (raised in %.2fs)" % elapsed)
+    finally:
+        eng.close()
+
+
+def test_server_returns_500_when_engine_unavailable():
+    """When the engine raises, POST /api/move must return a FAST HTTP 500
+    {'error': 'engine unavailable'} rather than hanging (which manifests as a
+    proxy 502 on the host)."""
+    import server
+    saved = server.ENGINE
+    from engine import ChessAmateurEngine as _Eng
+    server.ENGINE = _Eng(path="/bin/false", threads=1)
+    try:
+        status, data = _post("/api/move", {
+            "game_id": "x", "move": "e2e4",
+            "moves": [], "human_color": "white",
+        })
+        assert status == 500, (status, data)
+        assert data.get("error") == "engine unavailable", data
+        print("PASS /api/move -> 500 'engine unavailable' when engine broken")
+    finally:
+        try:
+            server.ENGINE.close()
+        except Exception:
+            pass
+        server.ENGINE = saved
+
+
 def main():
     test_engine()
     test_single_process_invariant_across_respawn()
+    test_engine_fails_fast_when_binary_broken()
     httpd, server = start_server()
     try:
         # new game as white
@@ -327,6 +382,10 @@ def main():
         assert status == 200, status
         assert "Chess Amateur" in body, body[:200]
         print("PASS GET / serves index.html")
+
+        # Engine-unavailable path: swap in a broken binary and confirm a fast
+        # HTTP 500 (not a hang / 502). Runs against the live test server.
+        test_server_returns_500_when_engine_unavailable()
 
         print("\nALL TESTS PASSED")
     finally:
