@@ -51,12 +51,17 @@ COPY static/ ./static/
 
 # Point the app at the downloaded engine and default to 128 threads.
 # On small hosts (e.g. Render free/starter) override with SF_THREADS=2.
+# PYTHONUNBUFFERED=1 forces Python's stdout/stderr to be unbuffered so the
+# app's startup + per-request logs actually reach the platform log collector
+# (otherwise block-buffering in a container hides all application logs).
 ENV STOCKFISH_PATH=/usr/local/bin/stockfish \
     PORT=8000 \
-    SF_THREADS=128
+    SF_THREADS=128 \
+    PYTHONUNBUFFERED=1
 
 # Hosting platforms typically inject their own PORT; the server honors it and
 # binds 0.0.0.0. 8000 is the local default.
 EXPOSE 8000
 
-CMD ["python3", "server.py"]
+# -u also forces unbuffered stdio, belt-and-suspenders with PYTHONUNBUFFERED.
+CMD ["python3", "-u", "server.py"]
