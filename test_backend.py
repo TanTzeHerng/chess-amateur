@@ -7,10 +7,15 @@ Exercises:
   - engine.py returns a legal UCI move for the start position
   - POST /api/new (white and black)
   - POST /api/move with a legal move (engine replies)
+  - STATELESS REGRESSION: after clearing the server's in-memory GAMES store
+    (simulating a different worker / a cold-started process on Render), a
+    POST /api/move that carries the client-side "moves" history still
+    SUCCEEDS (HTTP 200, engine replies, correct san_history) instead of 404
   - POST /api/new with a specific "threads" value is honored (returned in
     state) and the engine still returns a legal reply; missing/out-of-range/
     invalid "threads" falls back to the default (128)
-  - POST /api/move with an illegal move -> HTTP 400, state unchanged
+  - POST /api/move with an illegal move -> HTTP 400, state unchanged (the
+    carried history is unaffected -> no desync)
   - GET /api/state
   - in-progress result fields are None
   - explicit game-over detection: Fool's-mate checkmate reported with the
@@ -70,6 +75,29 @@ def start_server():
     return httpd, server
 
 
+def _live_stockfish_pids():
+    """Return the PIDs of currently-alive processes whose comm is 'stockfish'.
+
+    Enumerates /proc directly (pgrep is absent from the slim Docker image).
+    """
+    pids = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open("/proc/%s/comm" % entry) as fh:
+                comm = fh.read().strip()
+        except OSError:
+            continue
+        # /proc/<pid>/comm is truncated to 15 chars, so the local binary
+        # named "stockfish-linux-x86-64-universal" reports "stockfish-linux",
+        # while the Docker image's /usr/local/bin/stockfish reports
+        # "stockfish". Match the shared "stockfish" prefix to cover both.
+        if comm.startswith("stockfish"):
+            pids.append(int(entry))
+    return pids
+
+
 def test_engine():
     eng = ChessAmateurEngine()
     try:
@@ -83,8 +111,52 @@ def test_engine():
         eng.close()
 
 
+def test_single_process_invariant_across_respawn():
+    """Prove the respawn path never leaves two Stockfish processes alive.
+
+    Spawn one engine, capture its PID, then simulate a broken pipe by killing
+    the underlying process out from under the wrapper. The next best_move()
+    must (a) still return a legal move, (b) do so on a NEW process whose PID
+    differs from the dead one, and (c) leave exactly one live 'stockfish'
+    process (the old PID must be gone/reaped before/when the new one exists).
+    """
+    start = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    board = chess.Board(start)
+    eng = ChessAmateurEngine(threads=1)
+    try:
+        mv1 = eng.best_move(start, threads=1)
+        assert mv1 is not None and chess.Move.from_uci(mv1) in board.legal_moves, mv1
+        old_pid = eng._proc.pid
+        assert old_pid in _live_stockfish_pids(), "engine process not found after spawn"
+
+        # Force a respawn: kill the live proc and close its stdin so the next
+        # write raises BrokenPipeError/OSError, driving best_move's retry path.
+        eng._proc.kill()
+        eng._proc.wait(timeout=5)
+        try:
+            eng._proc.stdin.close()
+        except Exception:
+            pass
+
+        mv2 = eng.best_move(start, threads=1)
+        assert mv2 is not None and chess.Move.from_uci(mv2) in board.legal_moves, mv2
+        new_pid = eng._proc.pid
+        assert new_pid != old_pid, ("respawn should create a new process", old_pid, new_pid)
+
+        live = _live_stockfish_pids()
+        # The dead PID must be gone (terminated + reaped before the respawn).
+        assert old_pid not in live, ("old engine still alive after respawn", old_pid, live)
+        # This wrapper's engine must have exactly one live process.
+        assert new_pid in live, ("new engine not alive", new_pid, live)
+        print("PASS single-process invariant across respawn (old pid %d gone, new pid %d alive)"
+              % (old_pid, new_pid))
+    finally:
+        eng.close()
+
+
 def main():
     test_engine()
+    test_single_process_invariant_across_respawn()
     httpd, server = start_server()
     try:
         # new game as white
@@ -95,27 +167,64 @@ def main():
         assert data["fen"].startswith("rnbqkbnr/pppppppp"), data["fen"]
         assert len(data["legal_moves"]) == 20, data["legal_moves"]
         gid = data["game_id"]
+        assert data["moves"] == [], data.get("moves")
         print("PASS /api/new (white) game_id=%s" % gid)
 
-        # legal move -> engine replies
-        status, data = _post("/api/move", {"game_id": gid, "move": "e2e4"})
+        # legal move -> engine replies (client carries the move history)
+        status, data = _post("/api/move", {
+            "game_id": gid, "move": "e2e4",
+            "moves": [], "human_color": "white",
+        })
         assert status == 200, data
         assert data["san_history"][0] == "e4", data["san_history"]
         assert data["last_bot_move"] is not None, data
         assert len(data["san_history"]) == 2, data["san_history"]
+        # The authoritative history now carries both plies (human + bot).
+        assert data["moves"][0] == "e2e4", data["moves"]
+        assert data["moves"][1] == data["last_bot_move"]["uci"], data["moves"]
         assert not data["game_over"]
+        moves_after = data["moves"]
         print("PASS /api/move legal, bot replied:", data["last_bot_move"])
 
-        # illegal move -> 400, state unchanged
-        status_before, state_before = _get("/api/state?game_id=%s" % gid)
-        assert status_before == 200
-        fen_before = json.loads(state_before)["fen"]
-        status, data = _post("/api/move", {"game_id": gid, "move": "e2e4"})
+        # STATELESS REGRESSION TEST: simulate a different worker / a restarted
+        # process by WIPING the server's in-memory game store, then send a move
+        # carrying only the client-side history. Pre-fix this returned 404
+        # ("unknown game_id"); now it must succeed by rebuilding from "moves".
+        with server.GAMES_LOCK:
+            server.GAMES.clear()
+        status, data = _post("/api/move", {
+            "game_id": "gone-after-restart", "move": "g1f3",
+            "moves": moves_after, "human_color": "white",
+        })
+        assert status == 200, ("stateless move should succeed after memory wipe", status, data)
+        # History rebuilt + advanced: e4, <bot reply>, Nf3, <bot reply>.
+        assert data["san_history"][0] == "e4", data["san_history"]
+        assert data["san_history"][2] == "Nf3", data["san_history"]
+        assert data["moves"][2] == "g1f3", data["moves"]
+        assert data["last_bot_move"] is not None, data
+        rboard = chess.Board()
+        for uci in data["moves"]:
+            mv = chess.Move.from_uci(uci)
+            assert mv in rboard.legal_moves, ("rebuilt move illegal", uci, data["moves"])
+            rboard.push(mv)
+        print("PASS stateless /api/move after GAMES.clear() -> 200 (no 404), history rebuilt")
+
+        # illegal move -> 400, carried history unchanged (no desync)
+        status, data = _post("/api/move", {
+            "game_id": gid, "move": "e2e4",
+            "moves": moves_after, "human_color": "white",
+        })
         assert status == 400, (status, data)
         assert data.get("error") == "illegal move", data
-        _, state_after = _get("/api/state?game_id=%s" % gid)
-        assert json.loads(state_after)["fen"] == fen_before, "state changed on illegal move"
-        print("PASS /api/move illegal -> 400, state unchanged")
+        # A follow-up legal move using the SAME carried history still works,
+        # proving the illegal attempt did not corrupt/advance client state.
+        status, data = _post("/api/move", {
+            "game_id": gid, "move": "g1f3",
+            "moves": moves_after, "human_color": "white",
+        })
+        assert status == 200, data
+        assert data["moves"][2] == "g1f3", data["moves"]
+        print("PASS /api/move illegal -> 400, carried history unchanged (no desync)")
 
         # threads: a specific in-range value is honored and returned in state,
         # and the engine still returns a legal reply.
@@ -123,7 +232,10 @@ def main():
         assert status == 200, data
         assert data["threads"] == 2, data
         tgid = data["game_id"]
-        status, data = _post("/api/move", {"game_id": tgid, "move": "e2e4"})
+        status, data = _post("/api/move", {
+            "game_id": tgid, "move": "e2e4",
+            "moves": [], "human_color": "white", "threads": 2,
+        })
         assert status == 200, data
         assert data["threads"] == 2, data
         assert data["last_bot_move"] is not None, data
@@ -151,52 +263,64 @@ def main():
         assert status == 200, data
         assert data["human_color"] == "black"
         assert len(data["san_history"]) == 1, data["san_history"]
+        assert len(data["moves"]) == 1, data["moves"]
         assert data["last_bot_move"] is not None, data
         print("PASS /api/new (black), bot first move:", data["last_bot_move"])
 
         # in-progress result fields are None while the game continues
         status, data = _post("/api/new", {"human_color": "white"})
         gid2 = data["game_id"]
-        status, data = _post("/api/move", {"game_id": gid2, "move": "e2e4"})
+        status, data = _post("/api/move", {
+            "game_id": gid2, "move": "e2e4",
+            "moves": [], "human_color": "white",
+        })
         assert data["result"] is None and data["result_reason"] is None
         assert data["status"] in ("white_to_move", "black_to_move")
         assert not data["game_over"]
         print("PASS in-progress result fields are None")
 
-        # EXPLICIT game-over / terminal-position test.
-        # Build Fool's mate on a real python-chess board, register it in the
-        # server's game store, then read it back through the real GET /api/state
-        # serialization path and assert terminal fields.
-        mate_board = chess.Board()
-        for uci in ("f2f3", "e7e5", "g2g4", "d8h4"):
-            mate_board.push(chess.Move.from_uci(uci))
-        assert mate_board.is_checkmate(), "setup position is not checkmate"
-        san_history = ["f3", "e5", "g4", "Qh4#"]
-        mate_gid = "test-fools-mate"
+        # EXPLICIT game-over / terminal-position test, driven STATELESSLY.
+        # Fool's mate: 1.f3 e5 2.g4 Qh4#. The human (White) plays g2g4 as the
+        # final move, carrying the prior history; Black's mating reply already
+        # happened via the client... except here White is mated by Black's
+        # queen. Build it as: human=black, carried moves ["f2f3","e7e5","g2g4"],
+        # and the human (Black) plays the mating d8h4. Wipe memory first so this
+        # also proves terminal detection does not depend on server state.
         with server.GAMES_LOCK:
-            server.GAMES[mate_gid] = {
-                "game_id": mate_gid,
-                "board": mate_board,
-                "human_color": "white",
-                "san_history": san_history,
-            }
-        status, body = _get("/api/state?game_id=%s" % mate_gid)
-        assert status == 200, (status, body)
-        mate_state = json.loads(body)
-        assert mate_state["game_over"] is True, mate_state
-        # White (human) is checkmated, so Black wins -> "0-1".
-        assert mate_state["result"] == "0-1", mate_state["result"]
-        assert mate_state["result_reason"] == "checkmate", mate_state["result_reason"]
-        assert mate_state["status"] == "game_over", mate_state["status"]
-        assert mate_state["legal_moves"] == [], mate_state["legal_moves"]
-        assert mate_state["san_history"][-1] == "Qh4#", mate_state["san_history"]
-        print("PASS game-over detection: checkmate reported (result 0-1)")
+            server.GAMES.clear()
+        status, data = _post("/api/move", {
+            "game_id": "fresh-worker", "move": "d8h4",
+            "moves": ["f2f3", "e7e5", "g2g4"], "human_color": "black",
+        })
+        assert status == 200, (status, data)
+        assert data["game_over"] is True, data
+        # White is checkmated, so Black wins -> "0-1".
+        assert data["result"] == "0-1", data["result"]
+        assert data["result_reason"] == "checkmate", data["result_reason"]
+        assert data["status"] == "game_over", data["status"]
+        assert data["legal_moves"] == [], data["legal_moves"]
+        assert data["san_history"] == ["f3", "e5", "g4", "Qh4#"], data["san_history"]
+        # No bot reply once the game is already over.
+        assert data["last_bot_move"] is None, data
+        mate_moves = data["moves"]
+        print("PASS stateless game-over detection: Fool's mate reported (result 0-1)")
 
-        # Also verify /api/move refuses to move once the game is over.
-        status, data = _post("/api/move", {"game_id": mate_gid, "move": "e2e4"})
+        # Verify /api/move refuses to advance once the carried history is over.
+        status, data = _post("/api/move", {
+            "game_id": "fresh-worker", "move": "e2e4",
+            "moves": mate_moves, "human_color": "black",
+        })
         assert status == 400, (status, data)
         assert data.get("error") == "game is over", data
         print("PASS /api/move on finished game -> 400 'game is over'")
+
+        # A tampered / illegal move history is rejected wholesale.
+        status, data = _post("/api/move", {
+            "move": "e2e4", "moves": ["e2e4", "e2e4"], "human_color": "white",
+        })
+        assert status == 400, (status, data)
+        assert data.get("error") == "invalid move history", data
+        print("PASS /api/move with illegal move history -> 400 'invalid move history'")
 
         # static index served
         status, body = _get("/")
