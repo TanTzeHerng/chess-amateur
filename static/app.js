@@ -26,8 +26,13 @@ const threadsInput = document.getElementById("threads");
 const threadsBadge = document.getElementById("threadsBadge");
 
 // --- game state (client) ---
+// The CLIENT is the authoritative holder of the game history so the game
+// survives server restarts / multiple workers (e.g. on Render). Each /api/move
+// carries the full UCI move list; the server rebuilds the position from it.
 let state = null;        // last API state snapshot
+let moves = [];          // authoritative UCI move history so far
 let humanColor = "white";
+let threadsCount = 128;  // active engine threads for this game
 let selected = null;     // currently selected square (e.g. "e2")
 let legalFrom = {};      // map: fromSquare -> [toSquare, ...] from legal_moves
 let busy = false;        // guard against double-submits / mid-request clicks
@@ -317,7 +322,16 @@ async function sendMove(uci) {
     const res = await fetch("/api/move", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ game_id: state.game_id, move: uci }),
+      // Send the authoritative client-held history plus the new move. The
+      // server replays "moves" onto a fresh board, so it never depends on
+      // in-memory state and works across restarts / multiple workers.
+      body: JSON.stringify({
+        game_id: state.game_id,
+        move: uci,
+        moves: moves,
+        human_color: humanColor,
+        threads: threadsCount,
+      }),
     });
     if (res.status === 400) {
       // Illegal move (server is authority). Keep board as-is, no desync.
@@ -329,6 +343,7 @@ async function sendMove(uci) {
       return;
     }
     state = await res.json();
+    if (Array.isArray(state.moves)) moves = state.moves;
     renderAll();
   } catch (e) {
     showMessage("Network error. Please try again.");
@@ -351,6 +366,8 @@ async function newGame() {
   const chosen = document.querySelector('input[name="color"]:checked');
   humanColor = chosen ? chosen.value : "white";
   const threads = chosenThreads();
+  threadsCount = threads;
+  moves = [];
   setBusy(true);
   selected = null;
   clearMessage();
@@ -366,6 +383,9 @@ async function newGame() {
       return;
     }
     state = await res.json();
+    // Adopt the server's authoritative history + active thread count.
+    if (Array.isArray(state.moves)) moves = state.moves;
+    if (typeof state.threads === "number") threadsCount = state.threads;
     renderAll();
   } catch (e) {
     showMessage("Network error starting game.");
