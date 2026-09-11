@@ -15,12 +15,26 @@ Configuration via environment:
                   (default: /projects/sandbox/stockfish/stockfish-linux-x86-64-universal)
 """
 import os
+import select
 import subprocess
 import threading
+import time
 
 DEFAULT_STOCKFISH_PATH = "/projects/sandbox/stockfish/stockfish-linux-x86-64-universal"
 DEFAULT_DEPTH = 1
 DEFAULT_THREADS = 128
+
+# Bounded waits so a dead/incompatible engine FAILS FAST instead of hanging.
+# The uci/isready handshake must complete within a few seconds; a depth-1
+# search is near-instant but we allow a generous finite cap for slow/busy
+# hosts. On timeout (or if the process already exited) best_move raises a
+# clear RuntimeError rather than blocking forever on readline().
+HANDSHAKE_TIMEOUT = float(os.environ.get("SF_HANDSHAKE_TIMEOUT", "10"))
+SEARCH_TIMEOUT = float(os.environ.get("SF_SEARCH_TIMEOUT", "30"))
+
+
+class EngineUnavailable(RuntimeError):
+    """Raised when Stockfish fails to start or respond in a bounded time."""
 
 
 class ChessAmateurEngine:
@@ -59,19 +73,28 @@ class ChessAmateurEngine:
     # -- process lifecycle -------------------------------------------------
 
     def _spawn(self):
+        # Unbuffered BINARY stdout (bufsize=0, no text wrapper). We do our own
+        # line splitting over raw bytes read with os.read()+select so that
+        # select() reliably reflects data availability. A line-buffered
+        # TextIOWrapper (text=True, bufsize=1) would pull a big chunk from the
+        # pipe into Python's internal buffer, after which select() reports the
+        # fd "not readable" even though whole lines (e.g. 'uciok') are already
+        # buffered -> the bounded read would spuriously time out. Reading raw
+        # bytes avoids that hidden-buffer trap entirely.
         proc = subprocess.Popen(
             [self.path],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
+            bufsize=0,
         )
+        # Per-process byte buffer for our line reader.
+        proc._sf_buf = b""
         self._send(proc, "uci")
-        self._read_until(proc, "uciok")
+        self._read_until(proc, "uciok", timeout=HANDSHAKE_TIMEOUT)
         self._send(proc, "setoption name Threads value %d" % self.threads)
         self._send(proc, "isready")
-        self._read_until(proc, "readyok")
+        self._read_until(proc, "readyok", timeout=HANDSHAKE_TIMEOUT)
         self._applied_threads = self.threads
         return proc
 
@@ -81,7 +104,7 @@ class ChessAmateurEngine:
             return
         self._send(proc, "setoption name Threads value %d" % threads)
         self._send(proc, "isready")
-        self._read_until(proc, "readyok")
+        self._read_until(proc, "readyok", timeout=HANDSHAKE_TIMEOUT)
         self._applied_threads = threads
 
     def _ensure_proc(self):
@@ -99,16 +122,71 @@ class ChessAmateurEngine:
 
     @staticmethod
     def _send(proc, line):
-        proc.stdin.write(line + "\n")
-        proc.stdin.flush()
+        # stdin is a raw binary pipe (bufsize=0); encode and write bytes.
+        proc.stdin.write((line + "\n").encode("ascii"))
+        try:
+            proc.stdin.flush()
+        except Exception:
+            pass
 
     @staticmethod
-    def _read_until(proc, prefix):
-        """Read stdout lines until one starts with `prefix`. Ignores others."""
+    def _readline_bounded(proc, deadline):
+        """Read one stdout line (str), waiting at most until `deadline`.
+
+        Reads RAW BYTES from the stdout pipe fd with os.read() gated by
+        select(), maintaining our own byte buffer (proc._sf_buf) that we split
+        on newlines. Because we never rely on a TextIOWrapper's hidden internal
+        buffer, select() is an accurate readiness signal and a dead/hung engine
+        can never block us forever.
+
+        Raises EngineUnavailable if the process has already exited with no
+        remaining buffered line, or the deadline elapses. Returns the decoded
+        line (without trailing newline) otherwise.
+        """
+        fd = proc.stdout.fileno()
         while True:
-            line = proc.stdout.readline()
-            if not line:
-                return None
+            # Serve a complete line already sitting in our own buffer first.
+            nl = proc._sf_buf.find(b"\n")
+            if nl != -1:
+                line = proc._sf_buf[:nl]
+                proc._sf_buf = proc._sf_buf[nl + 1:]
+                return line.decode("utf-8", "replace").rstrip("\r")
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise EngineUnavailable(
+                    "Stockfish failed to start / respond (timed out)")
+            rlist, _, _ = select.select([fd], [], [], min(remaining, 0.5))
+            if not rlist:
+                # No data yet. If the process has exited and drained, fail fast.
+                if proc.poll() is not None:
+                    raise EngineUnavailable(
+                        "Stockfish failed to start / respond "
+                        "(process exited with %s)" % proc.returncode)
+                continue
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                raise EngineUnavailable(
+                    "Stockfish failed to start / respond (read error)")
+            if chunk == b"":
+                # EOF: the pipe closed, i.e. the process died. Surface any
+                # trailing partial line, else fail fast.
+                if proc._sf_buf:
+                    line = proc._sf_buf
+                    proc._sf_buf = b""
+                    return line.decode("utf-8", "replace").rstrip("\r")
+                raise EngineUnavailable(
+                    "Stockfish failed to start / respond (stdout closed)")
+            proc._sf_buf += chunk
+
+    def _read_until(self, proc, prefix, timeout):
+        """Read stdout lines until one starts with `prefix`, bounded by
+        `timeout` seconds. Ignores other lines. Raises EngineUnavailable on
+        timeout or if the process exits before the expected line arrives."""
+        deadline = time.monotonic() + timeout
+        while True:
+            line = self._readline_bounded(proc, deadline)
             if line.strip().startswith(prefix):
                 return line.strip()
 
@@ -126,10 +204,16 @@ class ChessAmateurEngine:
         with self._lock:
             try:
                 return self._best_move_locked(fen, threads)
-            except (BrokenPipeError, OSError, ValueError):
-                # Process may have died mid-request. Fully terminate + reap the
-                # old process (single-process invariant) BEFORE _best_move_locked
-                # -> _ensure_proc spawns a replacement, so RSS never doubles.
+            except (BrokenPipeError, OSError, ValueError, EngineUnavailable):
+                # Process may have died mid-request (broken pipe) or failed to
+                # respond in time. Fully terminate + reap the old process
+                # (single-process invariant) BEFORE _best_move_locked ->
+                # _ensure_proc spawns a replacement, so RSS never doubles. We
+                # retry exactly once: if the binary is genuinely broken (e.g.
+                # SIGILL-on-launch because the CPU lacks the required
+                # instructions), this second attempt also raises
+                # EngineUnavailable, which propagates to the caller as a
+                # fast, clear failure instead of an infinite hang.
                 self._kill()
                 return self._best_move_locked(fen, threads)
 
@@ -139,15 +223,14 @@ class ChessAmateurEngine:
             self._apply_threads(proc, int(threads))
         self._send(proc, "ucinewgame")
         self._send(proc, "isready")
-        self._read_until(proc, "readyok")
+        self._read_until(proc, "readyok", timeout=HANDSHAKE_TIMEOUT)
         self._send(proc, "position fen %s" % fen)
         self._send(proc, "go depth %d" % self.depth)
 
+        deadline = time.monotonic() + SEARCH_TIMEOUT
         bestmove = None
         while True:
-            line = proc.stdout.readline()
-            if not line:
-                raise OSError("Stockfish closed stdout unexpectedly")
+            line = self._readline_bounded(proc, deadline)
             line = line.strip()
             # ONLY the bestmove line matters. 'info' lines (PV + eval) are
             # intentionally ignored and never returned.
