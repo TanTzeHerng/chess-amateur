@@ -45,7 +45,7 @@ from urllib.parse import urlparse, parse_qs
 
 import chess
 
-from engine import ChessAmateurEngine, DEFAULT_THREADS
+from engine import ChessAmateurEngine, DEFAULT_THREADS, EngineUnavailable
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
@@ -300,6 +300,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._handle_move()
         except json.JSONDecodeError:
             return self._send_error_json("invalid JSON body", status=400)
+        except EngineUnavailable:
+            # The Stockfish engine failed to start or respond (e.g. an
+            # incompatible binary that dies on launch). Fail FAST with a clear
+            # 500 instead of hanging until the platform proxy times out (502).
+            return self._send_error_json("engine unavailable", status=500)
         return self._send_error_json("not found", status=404)
 
     # -- API handlers --
