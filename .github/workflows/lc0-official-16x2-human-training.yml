@@ -1,0 +1,270 @@
+name: LC0 official 16x2 human training
+
+on:
+  push:
+    branches:
+      - lc0-official-16x2-human-training
+  workflow_dispatch:
+
+jobs:
+  train:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 330
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y             build-essential cmake             libboost-all-dev             libopenblas-dev             protobuf-compiler             zlib1g-dev             pkg-config             ninja-build             meson             unzip             curl
+
+      - name: Set up Python 3.8 for legacy official trainer
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.8'
+
+      - name: Install legacy Lc0 trainer dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install             'numpy==1.19.5'             'tensorflow==2.5.1'             'protobuf==3.12.1'             'PyYAML==5.4.1'
+
+      - name: Build official PGN -> Lc0 training-data converter
+        run: |
+          git clone --depth 1 --recursive https://github.com/DanielUranga/trainingdata-tool.git /tmp/trainingdata-tool
+          cd /tmp/trainingdata-tool
+          cmake -DCMAKE_BUILD_TYPE=Release .
+          cmake --build . --config Release -- -j2
+
+      - name: Download human-game corpus
+        run: |
+          mkdir -p /tmp/human_data
+          curl -fL --retry 5 --retry-all-errors             -o /tmp/RuyLopezExchange.zip             https://www.pgnmentor.com/openings/RuyLopezExchange.zip
+          unzip -o /tmp/RuyLopezExchange.zip -d /tmp/human_data
+          GAMEFILE=/tmp/human_data/RuyLopezExchange.pgn
+          test -s "$GAMEFILE"
+          echo "PGN size: $(stat -c%s "$GAMEFILE") bytes"
+          echo "Game count: $(grep -c '^\[Event ' "$GAMEFILE")"
+
+      - name: Convert games into official Lc0 V4 training chunks
+        run: |
+          mkdir -p /tmp/lc0_data
+          cd /tmp/lc0_data
+          /tmp/trainingdata-tool/trainingdata-tool             -files-per-dir 10000             -chunks-per-file 4096             -max-games-to-convert 10000000             /tmp/human_data/RuyLopezExchange.pgn
+          echo "Produced training chunks:"
+          find /tmp/lc0_data -type f -name '*.gz' | wc -l
+          find /tmp/lc0_data -type f -name '*.gz' -print | head -20
+
+      - name: Fetch official Lc0 protobuf definition for the legacy trainer
+        run: |
+          mkdir -p /tmp/lczero-training/proto
+          git clone --depth 1 https://github.com/LeelaChessZero/lczero-training.git /tmp/lczero-training
+          curl -fL --retry 5 --retry-all-errors             -o /tmp/lczero-training/proto/net.proto             https://raw.githubusercontent.com/LeelaChessZero/lc0/release/0.32/proto/net.proto
+          touch /tmp/lczero-training/proto/__init__.py
+          protoc --proto_path=/tmp/lczero-training/proto             --python_out=/tmp/lczero-training/proto             /tmp/lczero-training/proto/net.proto
+          test -s /tmp/lczero-training/proto/net_pb2.py
+          python -m py_compile /tmp/lczero-training/proto/net_pb2.py
+
+      - name: Configure official Lc0 legacy 16x2 trainer
+        run: |
+          cat > /tmp/lczero-training/tf/official_16x2.yaml <<'YAML'
+          %YAML 1.2
+          ---
+          name: 'human-16x2-ruylopez-exchange'
+          gpu: 0
+
+          dataset:
+            num_chunks: 100000
+            allow_less_chunks: true
+            train_ratio: 0.90
+            input: '/tmp/lc0_data/*/'
+
+          training:
+            batch_size: 256
+            num_batch_splits: 1
+            test_steps: 250
+            train_avg_report_steps: 250
+            total_steps: 5000
+            warmup_steps: 250
+            shuffle_size: 65536
+            lr_values:
+              - 0.005
+              - 0.001
+            lr_boundaries:
+              - 3500
+            policy_loss_weight: 1.0
+            value_loss_weight: 1.0
+            moves_left_loss_weight: 0.0
+            path: '/tmp/lc0_models'
+            mask_legal_moves: true
+            moves_left_loss_weight: 0.0
+            q_ratio: 0.0
+
+          model:
+            filters: 16
+            residual_blocks: 2
+            se_ratio: 0
+            policy: 'convolution'
+            value: 'wdl'
+            moves_left: 'none'
+          ...
+          YAML
+
+      - name: Run official Lc0 training pipeline
+        working-directory: /tmp/lczero-training/tf
+        env:
+          PYTHONPATH: /tmp/lczero-training/tf:/tmp/lczero-training
+          TF_CPP_MIN_LOG_LEVEL: 1
+          OMP_NUM_THREADS: 2
+          OPENBLAS_NUM_THREADS: 2
+        run: |
+          mkdir -p /tmp/lc0_models
+          python train.py             --cfg /tmp/lczero-training/tf/official_16x2.yaml             --output /tmp/human-16x2-official.pb.gz
+
+      - name: Build official Lc0 0.32 CPU engine
+        run: |
+          git clone --depth 1 --branch release/0.32 https://github.com/LeelaChessZero/lc0.git /tmp/lc0
+          cd /tmp/lc0
+          ./build.sh
+
+      - name: Verify weights with official Lc0 and play self-game
+        working-directory: /tmp/lc0/build/release
+        env:
+          OMP_NUM_THREADS: 2
+          OPENBLAS_NUM_THREADS: 2
+        run: |
+          cp /tmp/human-16x2-official.pb.gz ./human-16x2-official.pb.gz
+
+          printf 'uci\nisready\nsetoption name Backend value blas\nsetoption name WeightsFile value %s\nisready\n'             "$(pwd)/human-16x2-official.pb.gz" | ./lc0 >/tmp/lc0_init.txt 2>&1 || true
+          grep -Ei 'readyok|error|unsupported' /tmp/lc0_init.txt || true
+
+          cat > /tmp/selfplay_script.txt <<'EOF'
+          uci
+          setoption name Backend value blas
+          setoption name WeightsFile value /tmp/lc0/build/release/human-16x2-official.pb.gz
+          setoption name Threads value 2
+          setoption name MinibatchSize value 8
+          isready
+          position startpos
+          go nodes 500
+          quit
+          EOF
+          ./lc0 < /tmp/selfplay_script.txt > /tmp/engine_game.txt 2>&1
+
+          cat /tmp/engine_game.txt
+
+      - name: Produce deterministic self-play PGN
+        run: |
+          cat > /tmp/play_self.py <<'PY'
+          import subprocess, time
+
+          lc0 = "/tmp/lc0/build/release/lc0"
+          weights = "/tmp/human-16x2-official.pb.gz"
+
+          def start():
+              p = subprocess.Popen(
+                  [lc0],
+                  stdin=subprocess.PIPE,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.STDOUT,
+                  text=True,
+                  bufsize=1,
+              )
+              def cmd(s):
+                  p.stdin.write(s + "\n")
+                  p.stdin.flush()
+              def read_until(token, limit=2000):
+                  out=[]
+                  for _ in range(limit):
+                      line=p.stdout.readline()
+                      if not line:
+                          break
+                      out.append(line.rstrip())
+                      if token in line:
+                          break
+                  return out
+              cmd("uci")
+              read_until("uciok")
+              cmd("setoption name Backend value blas")
+              cmd("setoption name WeightsFile value " + weights)
+              cmd("setoption name Threads value 2")
+              cmd("setoption name MinibatchSize value 8")
+              cmd("isready")
+              read_until("readyok")
+              return p, cmd, read_until
+
+          w, wc, wr = start()
+          b, bc, br = start()
+
+          # Keep both engines on the same fixed node budget.
+          wc("position startpos")
+          bc("position startpos")
+
+          moves=[]
+          board_moves=[]
+          side=0
+
+          # We use one engine at a time and feed the complete accumulated move list
+          # to each side, so this is an actual LC0-vs-LC0 UCI game with the same net.
+          current_moves=""
+          for ply in range(240):
+              eng = w if side == 0 else b
+              cmd = wc if side == 0 else bc
+              read = wr if side == 0 else br
+              cmd("position startpos moves" + ((" " + current_moves) if current_moves else ""))
+              cmd("go nodes 500")
+              best=None
+              while True:
+                  line=read("bestmove")[-1]
+                  if line.startswith("bestmove"):
+                      best=line.split()[1]
+                      break
+              if best in (None, "(none)"):
+                  break
+              moves.append(best)
+              current_moves += " " + best
+              side ^= 1
+
+          for p,cmd,_ in [(w,wc,wr),(b,bc,br)]:
+              try:
+                  cmd("quit")
+              except Exception:
+                  pass
+              try:
+                  p.terminate()
+              except Exception:
+                  pass
+
+          # Convert coordinate/UCI moves to SAN using a tiny dependency-free chess
+          # implementation is deliberately avoided here; instead ask Lc0 to emit
+          # SAN through its UCI info is not available. Save the legal UCI move list
+          # plus headers, and retain the exact move sequence as the authoritative game.
+          with open("/tmp/selfplay.pgn","w") as f:
+              f.write('[Event "Lc0 self-play"]\n')
+              f.write('[Site "GitHub Actions"]\n')
+              f.write('[White "human-16x2-official"]\n')
+              f.write('[Black "human-16x2-official"]\n')
+              f.write('[Result "*"]\n\n')
+              for i in range(0,len(moves),2):
+                  f.write(f"{i//2+1}. {moves[i]} ")
+                  if i+1 < len(moves):
+                      f.write(f"{moves[i+1]} ")
+              f.write("\n*\n")
+          print("plies:", len(moves))
+          PY
+          python /tmp/play_self.py
+
+      - name: Upload trained network, PGN, and logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: lc0-16x2-human-official-training
+          path: |
+            /tmp/human-16x2-official.pb.gz
+            /tmp/selfplay.pgn
+            /tmp/engine_game.txt
+            /tmp/lc0_init.txt
+            /tmp/lc0_models/**
+            /tmp/lczero-training/tf/leelalogs/**
+            /tmp/lczero-training/tf/official_16x2.yaml
+          if-no-files-found: warn
