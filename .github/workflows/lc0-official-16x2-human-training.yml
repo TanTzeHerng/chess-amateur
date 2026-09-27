@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - lc0-official-16x2-human-training
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
