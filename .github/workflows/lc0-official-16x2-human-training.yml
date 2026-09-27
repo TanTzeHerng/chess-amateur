@@ -67,7 +67,7 @@ jobs:
         run: |
           mkdir -p /tmp/lczero-training/proto
           git clone --depth 1 https://github.com/LeelaChessZero/lczero-training.git /tmp/lczero-training
-          curl -fL --retry 5 --retry-all-errors             -o /tmp/lczero-training/proto/net.proto             https://raw.githubusercontent.com/LeelaChessZero/lc0/release/0.32/proto/net.proto
+          curl -fL --retry 5 --retry-all-errors             -o /tmp/lczero-training/proto/net.proto             https://raw.githubusercontent.com/LeelaChessZero/lczero-common/b326b154221a6eb91977bdccf11d6f89e8547875/proto/net.proto
           touch /tmp/lczero-training/proto/__init__.py
           protoc --proto_path=/tmp/lczero-training/proto             --python_out=/tmp/lczero-training/proto             /tmp/lczero-training/proto/net.proto
           test -s /tmp/lczero-training/proto/net_pb2.py
