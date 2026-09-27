@@ -1,5 +1,9 @@
 name: LC0 official 16x2 human training
 
+concurrency:
+  group: lc0-official-16x2-human-training
+  cancel-in-progress: true
+
 on:
   push:
     branches:
@@ -110,7 +114,7 @@ jobs:
             se_ratio: 0
             policy: 'convolution'
             value: 'wdl'
-            moves_left: 'none'
+            moves_left: 'v1'
           ...
           YAML
 
