@@ -8,9 +8,6 @@ on:
   push:
     branches:
       - lc0-official-16x2-human-training
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:
@@ -65,8 +62,9 @@ jobs:
 
       - name: Fetch official Lc0 protobuf definition for the legacy trainer
         run: |
-          mkdir -p /tmp/lczero-training/proto
+          rm -rf /tmp/lczero-training
           git clone --depth 1 https://github.com/LeelaChessZero/lczero-training.git /tmp/lczero-training
+          mkdir -p /tmp/lczero-training/proto
           curl -fL --retry 5 --retry-all-errors             -o /tmp/lczero-training/proto/net.proto             https://raw.githubusercontent.com/LeelaChessZero/lczero-common/b326b154221a6eb91977bdccf11d6f89e8547875/proto/net.proto
           touch /tmp/lczero-training/proto/__init__.py
           protoc --proto_path=/tmp/lczero-training/proto             --python_out=/tmp/lczero-training/proto             /tmp/lczero-training/proto/net.proto
