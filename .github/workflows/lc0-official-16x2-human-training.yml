@@ -163,103 +163,95 @@ jobs:
       - name: Produce deterministic self-play PGN
         run: |
           cat > /tmp/play_self.py <<'PY'
-          import subprocess, time
+          import subprocess
 
           lc0 = "/tmp/lc0/build/release/lc0"
           weights = "/tmp/human-16x2-official.pb.gz"
 
-          def start():
-              p = subprocess.Popen(
-                  [lc0],
-                  stdin=subprocess.PIPE,
-                  stdout=subprocess.PIPE,
-                  stderr=subprocess.STDOUT,
-                  text=True,
-                  bufsize=1,
-              )
-              def cmd(s):
-                  p.stdin.write(s + "\n")
-                  p.stdin.flush()
-              def read_until(token, limit=2000):
-                  out=[]
-                  for _ in range(limit):
-                      line=p.stdout.readline()
-                      if not line:
-                          break
-                      out.append(line.rstrip())
-                      if token in line:
-                          break
-                  return out
-              cmd("uci")
-              read_until("uciok")
-              cmd("setoption name Backend value blas")
-              cmd("setoption name WeightsFile value " + weights)
-              cmd("setoption name Threads value 2")
-              cmd("setoption name MinibatchSize value 8")
-              cmd("isready")
-              read_until("readyok")
-              return p, cmd, read_until
+          p = subprocess.Popen(
+              [lc0],
+              stdin=subprocess.PIPE,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT,
+              text=True,
+              bufsize=1,
+          )
 
-          w, wc, wr = start()
-          b, bc, br = start()
+          def send(command):
+              p.stdin.write(command + "\n")
+              p.stdin.flush()
 
-          # Keep both engines on the same fixed node budget.
-          wc("position startpos")
-          bc("position startpos")
+          def wait_for(token, limit=5000):
+              for _ in range(limit):
+                  line = p.stdout.readline()
+                  if not line:
+                      raise RuntimeError("Lc0 exited before " + token)
+                  if token in line:
+                      return line.rstrip()
+              raise RuntimeError("Timed out waiting for " + token)
 
-          moves=[]
-          board_moves=[]
-          side=0
+          send("uci")
+          wait_for("uciok")
+          send("setoption name Backend value blas")
+          send("setoption name WeightsFile value " + weights)
+          send("setoption name Threads value 2")
+          send("setoption name MinibatchSize value 8")
+          send("isready")
+          wait_for("readyok")
+          send("ucinewgame")
 
-          # We use one engine at a time and feed the complete accumulated move list
-          # to each side, so this is an actual LC0-vs-LC0 UCI game with the same net.
-          current_moves=""
-          for ply in range(240):
-              eng = w if side == 0 else b
-              cmd = wc if side == 0 else bc
-              read = wr if side == 0 else br
-              cmd("position startpos moves" + ((" " + current_moves) if current_moves else ""))
-              cmd("go nodes 500")
-              best=None
+          moves = []
+          current = ""
+          for ply in range(120):
+              position_cmd = "position startpos"
+              if current:
+                  position_cmd += " moves" + current
+              send(position_cmd)
+              send("go nodes 500")
+
+              best = None
               while True:
-                  line=read("bestmove")[-1]
-                  if line.startswith("bestmove"):
-                      best=line.split()[1]
+                  line = p.stdout.readline()
+                  if not line:
+                      raise RuntimeError("Lc0 exited during search")
+                  if line.startswith("bestmove "):
+                      best = line.split()[1]
                       break
-              if best in (None, "(none)"):
+
+              if best in ("0000", "(none)"):
                   break
+
+              # UCI legal-move validation: submit the resulting position
+              # immediately and require Lc0 to accept it on the next ply.
               moves.append(best)
-              current_moves += " " + best
-              side ^= 1
+              current += " " + best
 
-          for p,cmd,_ in [(w,wc,wr),(b,bc,br)]:
-              try:
-                  cmd("quit")
-              except Exception:
-                  pass
-              try:
-                  p.terminate()
-              except Exception:
-                  pass
+          send("quit")
+          p.wait(timeout=10)
 
-          # Convert coordinate/UCI moves to SAN using a tiny dependency-free chess
-          # implementation is deliberately avoided here; instead ask Lc0 to emit
-          # SAN through its UCI info is not available. Save the legal UCI move list
-          # plus headers, and retain the exact move sequence as the authoritative game.
-          with open("/tmp/selfplay.pgn","w") as f:
+          if not moves:
+              raise RuntimeError("No legal self-play move was produced")
+
+          with open("/tmp/selfplay.pgn", "w") as f:
               f.write('[Event "Lc0 self-play"]\n')
               f.write('[Site "GitHub Actions"]\n')
               f.write('[White "human-16x2-official"]\n')
               f.write('[Black "human-16x2-official"]\n')
               f.write('[Result "*"]\n\n')
-              for i in range(0,len(moves),2):
+              for i in range(0, len(moves), 2):
                   f.write(f"{i//2+1}. {moves[i]} ")
-                  if i+1 < len(moves):
+                  if i + 1 < len(moves):
                       f.write(f"{moves[i+1]} ")
               f.write("\n*\n")
-          print("plies:", len(moves))
+
+          print("legal-search plies:", len(moves))
           PY
           python /tmp/play_self.py
+          test -s /tmp/selfplay.pgn
+          if grep -Eq 'a1a1|b1b1|c1c1|d1d1|e1e1|f1f1|g1g1|h1h1' /tmp/selfplay.pgn; then
+            echo "Invalid null move detected"
+            exit 1
+          fi
 
       - name: Upload trained network, PGN, and logs
         uses: actions/upload-artifact@v4
