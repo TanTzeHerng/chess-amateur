@@ -121,6 +121,7 @@ jobs:
         env:
           PYTHONPATH: /tmp/lczero-training/tf:/tmp/lczero-training
           TF_CPP_MIN_LOG_LEVEL: 1
+          TF_XLA_FLAGS: "--tf_xla_cpu_global_jit --tf_xla_auto_jit=2"
           OMP_NUM_THREADS: 2
           OPENBLAS_NUM_THREADS: 2
         run: |
