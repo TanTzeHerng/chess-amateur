@@ -77,7 +77,7 @@ jobs:
           %YAML 1.2
           ---
           name: 'human-16x2-ruylopez-exchange'
-          gpu: 0
+          gpu: all
 
           dataset:
             num_chunks: 100000
