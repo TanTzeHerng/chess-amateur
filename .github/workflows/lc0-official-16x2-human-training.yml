@@ -109,7 +109,7 @@ jobs:
           model:
             filters: 16
             residual_blocks: 2
-            se_ratio: 0
+            se_ratio: 2
             policy: 'convolution'
             value: 'wdl'
             moves_left: 'v1'
