@@ -76,7 +76,7 @@ jobs:
           cat > /tmp/lczero-training/tf/official_16x2.yaml <<'YAML'
           %YAML 1.2
           ---
-          name: 'human-16x2-ruylopez-exchange'
+          name: 'human-16x2-ruylopez-exchange-10k'
           gpu: all
 
           dataset:
@@ -90,7 +90,7 @@ jobs:
             num_batch_splits: 1
             test_steps: 50
             train_avg_report_steps: 50
-            total_steps: 150
+            total_steps: 10000
             warmup_steps: 250
             shuffle_size: 65536
             lr_values:
