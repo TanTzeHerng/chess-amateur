@@ -1,0 +1,164 @@
+name: Lc0 policy-only self-play
+
+on:
+  push:
+    branches:
+      - lc0-official-16x2-human-training
+  workflow_dispatch:
+
+jobs:
+  policy_selfplay:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download trained network artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lc0-16x2-human-official-training
+          path: /tmp/trained
+          github-token: ${{ github.token }}
+          repository: TanTzeHerng/chess-amateur
+          run-id: 36346588532
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ninja-build meson libopenblas-dev zlib1g-dev protobuf-compiler python3-pip
+
+      - name: Install PGN library
+        run: |
+          python3 -m pip install --disable-pip-version-check chess
+
+      - name: Build official Lc0 0.32.1
+        run: |
+          git clone --depth 1 --branch release/0.32 https://github.com/LeelaChessZero/lc0.git /tmp/lc0
+          cd /tmp/lc0
+          ./build.sh
+
+      - name: Extract and locate weights
+        run: |
+          WEIGHTS="$(find /tmp/trained -type f -name 'human-16x2-official.pb.gz' | head -1)"
+          test -s "$WEIGHTS"
+          cp "$WEIGHTS" /tmp/human-16x2-official.pb.gz
+          ls -lh /tmp/human-16x2-official.pb.gz
+
+      - name: Run true one-node policy self-play
+        run: |
+          cat > /tmp/policy_selfplay.py <<'PY'
+          import subprocess
+          import chess
+          import chess.pgn
+
+          LC0 = "/tmp/lc0/build/release/lc0"
+          WEIGHTS = "/tmp/human-16x2-official.pb.gz"
+          MAX_PLIES = 160
+
+          p = subprocess.Popen(
+              [LC0],
+              stdin=subprocess.PIPE,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT,
+              text=True,
+              bufsize=1,
+          )
+
+          def send(s):
+              p.stdin.write(s + "\n")
+              p.stdin.flush()
+
+          def until(token, limit=10000):
+              for _ in range(limit):
+                  line = p.stdout.readline()
+                  if not line:
+                      raise RuntimeError(f"Lc0 exited before {token}")
+                  if token in line:
+                      return line.rstrip()
+              raise RuntimeError(f"Timed out waiting for {token}")
+
+          send("uci")
+          until("uciok")
+          send("setoption name Backend value blas")
+          send("setoption name WeightsFile value " + WEIGHTS)
+          send("setoption name Threads value 1")
+          send("setoption name MinibatchSize value 1")
+          send("setoption name PolicyTemperature value 0")
+          send("isready")
+          until("readyok")
+
+          board = chess.Board()
+          moves = []
+
+          for ply in range(MAX_PLIES):
+              if board.is_game_over(claim_draw=True):
+                  break
+
+              uci_moves = " ".join(m.uci() for m in board.move_stack)
+              position = "position startpos"
+              if uci_moves:
+                  position += " moves " + uci_moves
+              send(position)
+
+              # A one-node Lc0 search evaluates the root and selects its
+              # root move without a deeper tree; this is the policy-driven
+              # self-play mode used here.
+              send("go nodes 1")
+
+              best = None
+              while True:
+                  line = p.stdout.readline()
+                  if not line:
+                      raise RuntimeError("Lc0 exited during search")
+                  if line.startswith("bestmove "):
+                      best = line.split()[1]
+                      break
+
+              move = chess.Move.from_uci(best)
+              if move not in board.legal_moves:
+                  raise RuntimeError(f"Illegal move from Lc0: {best}")
+
+              board.push(move)
+              moves.append(move.uci())
+
+          send("quit")
+          p.wait(timeout=10)
+
+          game = chess.pgn.Game()
+          game.headers["Event"] = "Lc0 Policy-Only Self-Play"
+          game.headers["Site"] = "GitHub Actions"
+          game.headers["Date"] = "2026.09.28"
+          game.headers["White"] = "human-16x2-official-policy"
+          game.headers["Black"] = "human-16x2-official-policy"
+          game.headers["Result"] = board.result(claim_draw=True) if board.is_game_over(claim_draw=True) else "*"
+          node = game
+          for move in board.mainline_moves():
+              node = node.add_variation(move)
+          game.setup(chess.Board())
+          # Rebuild the mainline because setup() on the root is sufficient for startpos.
+          game = chess.pgn.Game()
+          game.headers["Event"] = "Lc0 Policy-Only Self-Play"
+          game.headers["Site"] = "GitHub Actions"
+          game.headers["Date"] = "2026.09.28"
+          game.headers["White"] = "human-16x2-official-policy"
+          game.headers["Black"] = "human-16x2-official-policy"
+          game.headers["Result"] = board.result(claim_draw=True) if board.is_game_over(claim_draw=True) else "*"
+          node = game
+          for u in moves:
+              node = node.add_variation(chess.Move.from_uci(u))
+              # The variation node is legal relative to the game board maintained by python-chess.
+          with open("/tmp/policy_only_selfplay.pgn", "w") as f:
+              print(game, file=f, end="\n")
+
+          print(f"plies={len(moves)}")
+          print(open("/tmp/policy_only_selfplay.pgn").read())
+          PY
+          python3 /tmp/policy_selfplay.py
+
+      - name: Upload policy-only PGN
+        uses: actions/upload-artifact@v4
+        with:
+          name: lc0-policy-only-selfplay
+          path: /tmp/policy_only_selfplay.pgn
