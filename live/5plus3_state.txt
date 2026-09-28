@@ -1,16 +1,16 @@
 # Lc0 5+3 live self-play
 
-Move count: 3
-Side to move: Black
+Move count: 4
+Side to move: White
 White clock: 277.551s
-Black clock: 287.250s
-Last move: Bb5
-Last UCI: f1b5
-Last search time: 10.370s
-Search info: info depth 5 seldepth 10 time 10369 nodes 199787 score cp 14 nps 12265 tbhits 0 pv f1b5 f8b4 b5c6 d7c6 g1f3 b4c3 d2c3 b8d7 e1g1
+Black clock: 284.319s
+Last move: Na6
+Last UCI: b8a6
+Last search time: 5.931s
+Search info: info depth 5 seldepth 10 time 5931 nodes 76001 score cp -2 nps 9843 tbhits 0 pv b8a6 b5c6 d7c6 a2a3 e8d7 d1f3 d7e6 f3g4
 Result: *
-FEN: rnbqkbnr/pppp1ppp/8/1B2p3/4P3/8/PPPP1PPP/RNBQK1NR b KQkq - 1 2
+FEN: r1bqkbnr/pppp1ppp/n7/1B2p3/4P3/8/PPPP1PPP/RNBQK1NR w KQkq - 2 3
 
 ## Moves
 
-1. e4 e5 2. Bb5 
+1. e4 e5 2. Bb5 Na6 
