@@ -1,16 +1,16 @@
 # Lc0 5+3 live self-play
 
-Move count: 29
-Side to move: Black
+Move count: 30
+Side to move: White
 White clock: 212.235s
-Black clock: 207.077s
-Last move: Qf3
-Last UCI: d1f3
-Last search time: 7.790s
-Search info: info depth 5 seldepth 11 time 7789 nodes 97155 score cp 26 nps 10413 tbhits 0 pv d1f3 g8f6 f3h1 c5b4 b1d2 b4c3 d4e5 c3b2
+Black clock: 200.661s
+Last move: Nf6
+Last UCI: g8f6
+Last search time: 9.416s
+Search info: info depth 6 seldepth 11 time 9415 nodes 107391 score cp -15 nps 9655 tbhits 0 pv g8f6 b1d2 h7h5 d4e5 d8c7 e5d6 c5b4 g4h5 b4c3 d6c7
 Result: *
-FEN: r2qk1nr/p5pp/n1pp4/1pb1p3/3PP1P1/5Q2/P1P2R1P/RNB1K3 b Qk - 1 15
+FEN: r2qk2r/p5pp/n1pp1n2/1pb1p3/3PP1P1/5Q2/P1P2R1P/RNB1K3 w Qk - 2 16
 
 ## Moves
 
-1. e4 e5 2. Bb5 Na6 3. Bc6 Rb8 4. b4 dxc6 5. f3 Ne7 6. Nh3 Nf5 7. Rf1 Nh6 8. Ng5 Ra8 9. Rf2 Ng8 10. g4 Bxb4 11. Nxf7 Bc5 12. Nd6+ cxd6 13. d4 Bxg4 14. fxg4 b5 15. Qf3 
+1. e4 e5 2. Bb5 Na6 3. Bc6 Rb8 4. b4 dxc6 5. f3 Ne7 6. Nh3 Nf5 7. Rf1 Nh6 8. Ng5 Ra8 9. Rf2 Ng8 10. g4 Bxb4 11. Nxf7 Bc5 12. Nd6+ cxd6 13. d4 Bxg4 14. fxg4 b5 15. Qf3 Nf6 
