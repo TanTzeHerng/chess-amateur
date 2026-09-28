@@ -1,0 +1,184 @@
+name: Lc0 5plus3 live self-play
+
+on:
+  push:
+    branches:
+      - lc0-official-16x2-human-training
+  workflow_dispatch:
+
+jobs:
+  play:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download trained network artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lc0-16x2-human-official-training
+          path: /tmp/trained
+          github-token: ${{ github.token }}
+          repository: TanTzeHerng/chess-amateur
+          run-id: 36346588532
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ninja-build meson libopenblas-dev zlib1g-dev
+          python3 -m pip install --disable-pip-version-check chess
+
+      - name: Build official Lc0 0.32.1
+        run: |
+          git clone --depth 1 --branch release/0.32 https://github.com/LeelaChessZero/lc0.git /tmp/lc0
+          cd /tmp/lc0
+          ./build.sh
+
+      - name: Locate weights
+        run: |
+          W="$(find /tmp/trained -type f -name 'human-16x2-official.pb.gz' | head -1)"
+          test -s "$W"
+          cp "$W" /tmp/human-16x2-official.pb.gz
+
+      - name: Play 5+3 live game
+        run: |
+          cat > /tmp/play_5plus3.py <<'PY'
+          import subprocess
+          import time
+          import chess
+          import chess.pgn
+
+          LC0 = "/tmp/lc0/build/release/lc0"
+          WEIGHTS = "/tmp/human-16x2-official.pb.gz"
+
+          p = subprocess.Popen(
+              [LC0],
+              stdin=subprocess.PIPE,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT,
+              text=True,
+              bufsize=1,
+          )
+
+          def send(s):
+              p.stdin.write(s + "\n")
+              p.stdin.flush()
+
+          def wait_for(token, limit=10000):
+              for _ in range(limit):
+                  line = p.stdout.readline()
+                  if not line:
+                      raise RuntimeError("Lc0 exited before " + token)
+                  if token in line:
+                      return
+              raise RuntimeError("Timeout waiting for " + token)
+
+          send("uci")
+          wait_for("uciok")
+          send("setoption name Backend value blas")
+          send("setoption name WeightsFile value " + WEIGHTS)
+          send("setoption name Threads value 2")
+          send("setoption name MinibatchSize value 8")
+          send("setoption name cpuct value 1.745")
+          send("isready")
+          wait_for("readyok")
+
+          board = chess.Board()
+          white_ms = 300000
+          black_ms = 300000
+          inc_ms = 3000
+          moves = []
+
+          print("LIVE 5+3 GAME START")
+          print(f"WHITE_CLOCK={white_ms/1000:.3f}s BLACK_CLOCK={black_ms/1000:.3f}s", flush=True)
+
+          while not board.is_game_over(claim_draw=True) and len(moves) < 300:
+              stm = board.turn
+              before = time.monotonic()
+
+              uci_moves = " ".join(m.uci() for m in board.move_stack)
+              cmd = "position startpos"
+              if uci_moves:
+                  cmd += " moves " + uci_moves
+              send(cmd)
+
+              if stm:
+                  send(f"go wtime {white_ms} btime {black_ms} winc {inc_ms} binc {inc_ms}")
+              else:
+                  send(f"go wtime {white_ms} btime {black_ms} winc {inc_ms} binc {inc_ms}")
+
+              best = None
+              last_info = None
+              while True:
+                  line = p.stdout.readline()
+                  if not line:
+                      raise RuntimeError("Lc0 exited during game")
+                  if line.startswith("info "):
+                      last_info = line.rstrip()
+                  if line.startswith("bestmove "):
+                      best = line.split()[1]
+                      break
+
+              elapsed = int((time.monotonic() - before) * 1000)
+              if stm:
+                  white_ms = max(0, white_ms - elapsed + inc_ms)
+                  clock = white_ms
+              else:
+                  black_ms = max(0, black_ms - elapsed + inc_ms)
+                  clock = black_ms
+
+              move = chess.Move.from_uci(best)
+              if move not in board.legal_moves:
+                  raise RuntimeError("Illegal Lc0 move: " + best)
+
+              san = board.san(move)
+              board.push(move)
+              moves.append(move.uci())
+
+              print(
+                  f"MOVE {len(moves)} {'White' if stm else 'Black'} "
+                  f"{san} [{best}] "
+                  f"elapsed={elapsed/1000:.3f}s "
+                  f"W={white_ms/1000:.3f}s B={black_ms/1000:.3f}s",
+                  flush=True,
+              )
+              print("FEN " + board.fen(), flush=True)
+              if last_info:
+                  # Print only the final info line for each move; this includes
+                  # search depth/nodes/PV information from the real search.
+                  print("SEARCH " + last_info, flush=True)
+
+              if clock <= 0:
+                  break
+
+          send("quit")
+          p.wait(timeout=10)
+
+          game = chess.pgn.Game()
+          game.headers["Event"] = "Lc0 5+3 Self-Play"
+          game.headers["Site"] = "GitHub Actions"
+          game.headers["Date"] = "2026.09.28"
+          game.headers["White"] = "human-16x2-official-search"
+          game.headers["Black"] = "human-16x2-official-search"
+          game.headers["TimeControl"] = "300+3"
+          game.headers["Result"] = board.result(claim_draw=True) if board.is_game_over(claim_draw=True) else "*"
+          node = game
+          for m in board.move_stack:
+              node = node.add_variation(m)
+
+          with open("/tmp/lc0-5plus3-selfplay.pgn", "w") as f:
+              print(game, file=f, end="\n")
+
+          print("FINAL_RESULT", game.headers["Result"], flush=True)
+          print("FINAL_PLIES", len(moves), flush=True)
+          print("FINAL_FEN", board.fen(), flush=True)
+          PY
+          python3 /tmp/play_5plus3.py
+
+      - name: Upload PGN
+        uses: actions/upload-artifact@v4
+        with:
+          name: lc0-5plus3-selfplay
+          path: /tmp/lc0-5plus3-selfplay.pgn
