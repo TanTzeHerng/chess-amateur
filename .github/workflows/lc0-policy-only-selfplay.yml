@@ -134,21 +134,8 @@ jobs:
           game.headers["Black"] = "human-16x2-official-policy"
           game.headers["Result"] = board.result(claim_draw=True) if board.is_game_over(claim_draw=True) else "*"
           node = game
-          for move in board.mainline_moves():
-              node = node.add_variation(move)
-          game.setup(chess.Board())
-          # Rebuild the mainline because setup() on the root is sufficient for startpos.
-          game = chess.pgn.Game()
-          game.headers["Event"] = "Lc0 Policy-Only Self-Play"
-          game.headers["Site"] = "GitHub Actions"
-          game.headers["Date"] = "2026.09.28"
-          game.headers["White"] = "human-16x2-official-policy"
-          game.headers["Black"] = "human-16x2-official-policy"
-          game.headers["Result"] = board.result(claim_draw=True) if board.is_game_over(claim_draw=True) else "*"
-          node = game
           for u in moves:
               node = node.add_variation(chess.Move.from_uci(u))
-              # The variation node is legal relative to the game board maintained by python-chess.
           with open("/tmp/policy_only_selfplay.pgn", "w") as f:
               print(game, file=f, end="\n")
 
