@@ -162,8 +162,11 @@ jobs:
 
       - name: Produce deterministic self-play PGN
         run: |
+          python -m pip install 'python-chess==1.11.2'
           cat > /tmp/play_self.py <<'PY'
           import subprocess
+          import chess
+          import chess.pgn
 
           lc0 = "/tmp/lc0/build/release/lc0"
           weights = "/tmp/human-16x2-official.pb.gz"
@@ -201,11 +204,11 @@ jobs:
           send("ucinewgame")
 
           moves = []
-          current = ""
+          current = []
           for ply in range(120):
               position_cmd = "position startpos"
               if current:
-                  position_cmd += " moves" + current
+                  position_cmd += " moves " + " ".join(current)
               send(position_cmd)
               send("go nodes 500")
 
@@ -220,38 +223,41 @@ jobs:
 
               if best in ("0000", "(none)"):
                   break
-
-              # UCI legal-move validation: submit the resulting position
-              # immediately and require Lc0 to accept it on the next ply.
               moves.append(best)
-              current += " " + best
+              current.append(best)
 
           send("quit")
           p.wait(timeout=10)
 
-          if not moves:
-              raise RuntimeError("No legal self-play move was produced")
+          board = chess.Board()
+          game = chess.pgn.Game()
+          game.headers["Event"] = "Lc0 self-play"
+          game.headers["Site"] = "GitHub Actions"
+          game.headers["White"] = "human-16x2-official"
+          game.headers["Black"] = "human-16x2-official"
+          game.headers["Result"] = "*"
+
+          node = game
+          for uci in moves:
+              try:
+                  move = chess.Move.from_uci(uci)
+              except ValueError as exc:
+                  raise RuntimeError(f"Bad UCI move emitted by Lc0: {uci}") from exc
+              if move not in board.legal_moves:
+                  raise RuntimeError(f"Illegal move emitted by Lc0: {uci} at FEN {board.fen()}")
+              node = node.add_main_variation(move)
+              board.push(move)
 
           with open("/tmp/selfplay.pgn", "w") as f:
-              f.write('[Event "Lc0 self-play"]\n')
-              f.write('[Site "GitHub Actions"]\n')
-              f.write('[White "human-16x2-official"]\n')
-              f.write('[Black "human-16x2-official"]\n')
-              f.write('[Result "*"]\n\n')
-              for i in range(0, len(moves), 2):
-                  f.write(f"{i//2+1}. {moves[i]} ")
-                  if i + 1 < len(moves):
-                      f.write(f"{moves[i+1]} ")
-              f.write("\n*\n")
+              exporter = chess.pgn.StringExporter(headers=True, variations=False, comments=False)
+              f.write(game.accept(exporter))
+              f.write("\n")
 
           print("legal-search plies:", len(moves))
+          print("final FEN:", board.fen())
           PY
           python /tmp/play_self.py
           test -s /tmp/selfplay.pgn
-          if grep -Eq 'a1a1|b1b1|c1c1|d1d1|e1e1|f1f1|g1g1|h1h1' /tmp/selfplay.pgn; then
-            echo "Invalid null move detected"
-            exit 1
-          fi
 
       - name: Upload trained network, PGN, and logs
         uses: actions/upload-artifact@v4
