@@ -1,0 +1,15 @@
+# Lc0 5+3 live self-play
+
+Move count: 0
+Side to move: White
+White clock: 300.000s
+Black clock: 300.000s
+Last move: -
+Last UCI: -
+Last search time: 0.000s
+Result: *
+FEN: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1
+
+## Moves
+
+
