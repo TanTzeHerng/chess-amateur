@@ -1,0 +1,37 @@
+name: Package Stockfish 17.1 for local CPU testing
+on:
+  push:
+    branches:
+      - experiments/sf171-multipv-screen-20261016
+    paths:
+      - .github/workflows/prepare-sf171-local-cpu.yml
+  workflow_dispatch:
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch official Stockfish 17.1 x86-64 Linux release
+        shell: bash
+        run: |
+          mkdir -p /tmp/sf /tmp/ship
+          curl -fsSL --retry 3 -o /tmp/stockfish.tar https://github.com/official-stockfish/Stockfish/releases/download/sf_17.1/stockfish-ubuntu-x86-64.tar
+          tar -xf /tmp/stockfish.tar -C /tmp/sf
+          find /tmp/sf -maxdepth 5 -type f | head -80
+          find /tmp/sf -type f -name 'stockfish-ubuntu-x86-64' -exec cp '{}' /tmp/ship/stockfish \;
+          test -s /tmp/ship/stockfish
+          chmod +x /tmp/ship/stockfish
+          find /tmp/sf -type f -name '*.nnue' -exec cp '{}' /tmp/ship/ \;
+          /tmp/ship/stockfish <<'EOF'
+          uci
+          quit
+          EOF
+          du -sh /tmp/ship/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sf171-linux-original-binary-nnue
+          path: /tmp/ship/
+          retention-days: 1
