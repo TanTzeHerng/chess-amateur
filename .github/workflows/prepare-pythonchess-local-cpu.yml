@@ -1,0 +1,25 @@
+name: Package local chess referee library
+on:
+  push:
+    branches:
+      - experiments/sf171-multipv-screen-20261016
+    paths:
+      - .github/workflows/prepare-pythonchess-local-cpu.yml
+  workflow_dispatch:
+jobs:
+  referee:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          mkdir -p /tmp/wheels
+          python -m pip download --no-deps --dest /tmp/wheels chess==1.11.2
+          find /tmp/wheels -type f -maxdepth 1 -printf '%f %s bytes\n'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chess-py3-referee-wheel
+          path: /tmp/wheels/
+          retention-days: 1
