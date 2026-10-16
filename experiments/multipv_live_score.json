@@ -1,27 +1,31 @@
 {
-  "event": "Stockfish 17.1 depth1 1024 threads MultiPV1 vs MultiPV4",
-  "state": "stopped_runner_error",
+  "event": "Stockfish 17.1 depth 1, 1024 threads, default Hash, Syzygy 5-men",
+  "run_id": "38878898181",
+  "state": "playing",
   "score": {
-    "MultiPV1_wins": 0,
+    "MPV1_wins": 0,
     "draws": 0,
-    "MultiPV4_wins": 0,
-    "legally_completed_games": 0
+    "MPV4_wins": 0,
+    "completed": 0
   },
-  "last_attempt": {
-    "workflow_run": 38877327495,
-    "game": 1,
-    "ply": 7,
-    "reason": "GitHub Actions runner received shutdown signal SIGTERM (exit 143) before Game 1 ended"
-  },
-  "conditions": {
+  "current": null,
+  "last_completed_game": null,
+  "errors": [],
+  "settings": {
+    "Stockfish": "17.1",
+    "Threads": 1024,
+    "depth": 1,
     "MultiPV": [
       1,
       4
     ],
-    "Threads": 1024,
-    "depth": 1,
-    "Hash_MB": 16,
-    "Syzygy_5_men": true
+    "Hash": "UCI default, untouched",
+    "SyzygyProbeLimit": 5,
+    "screen_at": [
+      20,
+      40
+    ],
+    "maximum_games": 100
   },
-  "note": "Technical failures are not scored as losses. A match score cannot be claimed until a chess-rule game completes."
-}
+  "updated_utc": "2026-10-16T09:14:19.515218+00:00"
+}\n
