@@ -69,7 +69,10 @@ def main():
             default_hash = eng.options["Hash"].default
             if default_hash != 16:
                 raise RuntimeError(f"Unexpected default hash {default_hash}")
-            eng.configure({"Threads": 1024, "SyzygyPath": TB,
+            # Keep the idle opponent at 1 thread to avoid >2048 simultaneous
+            # threads on a 4-core hosted runner. Each actual depth-1 search
+            # still runs at the requested 1024 Stockfish threads.
+            eng.configure({"Threads": 1, "SyzygyPath": TB,
                            "SyzygyProbeLimit": 5, "Syzygy50MoveRule": True,
                            "Skill Level": 20})
             if "SyzygyProbeDepth" in eng.options:
@@ -79,9 +82,8 @@ def main():
         data["status"] = "playing"
         save(data)
         pairings = [(opening, white) for opening in OPENINGS for white in (True, False)] * 5
+        active_thread_owner = None
         with (ROOT / "games.pgn").open("a", encoding="utf8", buffering=1) as fp:
-            for num, (pv4_white, opening) in enumerate([], 1):
-                pass
             for num, (opening, pv4_white) in enumerate(pairings, 1):
                 played = data["score"]["completed"]
                 if played in (20, 40):
@@ -117,6 +119,11 @@ def main():
                         if board.is_game_over(claim_draw=True):
                             break
                         pv = 4 if (board.turn == chess.WHITE) == pv4_white else 1
+                        if active_thread_owner != pv:
+                            if active_thread_owner is not None:
+                                engines[active_thread_owner].configure({"Threads": 1})
+                            engines[pv].configure({"Threads": 1024})
+                            active_thread_owner = pv
                         info = engines[pv].analyse(
                             board, chess.engine.Limit(depth=1),
                             multipv=pv, game=num)
