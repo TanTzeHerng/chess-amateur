@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     permissions:
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -49,6 +49,8 @@ jobs:
           quit
           EOF
       - name: Play controlled paired opening games
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python -u experiments/sf171_multipv_screen.py
         timeout-minutes: 200
       - name: Upload scored PGNs and screening result
