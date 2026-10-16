@@ -1,22 +1,29 @@
 {
-  "event": "Stockfish 17.1 (depth 1, Threads 1024, MultiPV 1 vs 4, default Hash 16 MB, five-piece Syzygy)",
-  "state": "halted_before_first_legal_result",
+  "event": "Stockfish 17.1 depth-1 Threads=1024 MultiPV=1 vs MultiPV=4",
+  "status": "screen_20_games_complete",
   "score": {
-    "MPV1_wins": 0,
-    "draws": 0,
-    "MPV4_wins": 0,
-    "completed": 0
+    "MPV1_wins": 9,
+    "draws": 5,
+    "MPV4_wins": 6,
+    "completed": 20
   },
-  "latest_run": {
-    "id": 38878898181,
-    "status": "failed",
-    "reason": "GitHub Actions runner received a shutdown signal (exit code 143) during Game 1, before any legal result",
-    "confirmed_from": "2026-10-16 09:14:46 UTC workflow job log"
+  "match_points": {
+    "MPV1": 11.5,
+    "MPV4": 8.5
   },
-  "previous_runs": [
-    38877327495,
-    38878869834
-  ],
-  "technical_errors_counted_as_results": 0,
-  "note": "Scoreboard manually verified from completed GitHub job logs; no wins, losses or draws occurred. The current source runner cannot finish games with 1024 threads on the 4-vCPU GitHub hosted runner."
+  "settings": {
+    "Stockfish": "17.1",
+    "Threads": 1024,
+    "depth": 1,
+    "Hash": "16 MB default",
+    "SyzygyProbeLimit": 5,
+    "SyzygyWDL": 145,
+    "SyzygyDTZ": 145,
+    "SkillLevel": 20
+  },
+  "executed_on": "Modal 16 physical CPU core cloud worker",
+  "all_games_pgn": "experiments/stockfish171_multipv1_vs_multipv4_20games.pgn",
+  "verification": "20 PGNs loaded using python-chess; all 20 end positions have legal chess results agreeing with PGN headers; 0 PGN parse errors",
+  "continuation_policy": "No 100-game extension; MultiPV=4 failed to lead after 20 games",
+  "prior_github_attempts": "GitHub runners had no completed games, so those attempts are not counted"
 }
