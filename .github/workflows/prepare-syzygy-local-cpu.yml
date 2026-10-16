@@ -24,10 +24,33 @@ jobs:
           test "$(find 3-4-5-wdl -type f -name '*.rtbw' | wc -l)" -eq 145
           test "$(find 3-4-5-dtz -type f -name '*.rtbz' | wc -l)" -eq 145
           du -sh 3-4-5-wdl 3-4-5-dtz
-      - name: Upload complete 5-man tables
+      - name: Split DTZ tables into two download-safe archives
+        shell: bash
+        run: |
+          mkdir -p /tmp/dtz-a /tmp/dtz-b
+          find /tmp/syzygy/3-4-5-dtz -name '*.rtbz' | sort | awk 'NR<=72' | xargs -r -I {} cp {} /tmp/dtz-a/
+          find /tmp/syzygy/3-4-5-dtz -name '*.rtbz' | sort | awk 'NR>72' | xargs -r -I {} cp {} /tmp/dtz-b/
+          test "$(find /tmp/dtz-a -name '*.rtbz' | wc -l)" -eq 72
+          test "$(find /tmp/dtz-b -name '*.rtbz' | wc -l)" -eq 73
+          du -sh /tmp/dtz-a /tmp/dtz-b
+      - name: Upload 5-man WDL
         uses: actions/upload-artifact@v4
         with:
-          name: syzygy-five-men-wdl-dtz
-          path: /tmp/syzygy/
+          name: syzygy-5men-wdl-145
+          path: /tmp/syzygy/3-4-5-wdl/*.rtbw
+          compression-level: 0
+          retention-days: 1
+      - name: Upload 5-man DTZ first half
+        uses: actions/upload-artifact@v4
+        with:
+          name: syzygy-5men-dtz-72
+          path: /tmp/dtz-a/*.rtbz
+          compression-level: 0
+          retention-days: 1
+      - name: Upload 5-man DTZ second half
+        uses: actions/upload-artifact@v4
+        with:
+          name: syzygy-5men-dtz-73
+          path: /tmp/dtz-b/*.rtbz
           compression-level: 0
           retention-days: 1
