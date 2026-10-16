@@ -1,0 +1,33 @@
+name: Package five-piece Syzygy for local CPU test
+on:
+  push:
+    branches:
+      - experiments/sf171-multipv-screen-20261016
+    paths:
+      - .github/workflows/prepare-syzygy-local-cpu.yml
+  workflow_dispatch:
+jobs:
+  tables:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download full official-format three-to-five-piece WDL and DTZ
+        shell: bash
+        run: |
+          mkdir -p /tmp/syzygy/3-4-5-wdl /tmp/syzygy/3-4-5-dtz
+          cd /tmp/syzygy
+          wget --no-verbose -r -nH --cut-dirs=2 --no-parent --reject="index.html*" -e robots=off https://tablebase.lichess.ovh/tables/standard/3-4-5-wdl/
+          wget --no-verbose -r -nH --cut-dirs=2 --no-parent --reject="index.html*" -e robots=off https://tablebase.lichess.ovh/tables/standard/3-4-5-dtz/
+          test "$(find 3-4-5-wdl -type f -name '*.rtbw' | wc -l)" -eq 145
+          test "$(find 3-4-5-dtz -type f -name '*.rtbz' | wc -l)" -eq 145
+          du -sh 3-4-5-wdl 3-4-5-dtz
+      - name: Upload complete 5-man tables
+        uses: actions/upload-artifact@v4
+        with:
+          name: syzygy-five-men-wdl-dtz
+          path: /tmp/syzygy/
+          compression-level: 0
+          retention-days: 1
