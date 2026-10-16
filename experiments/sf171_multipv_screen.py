@@ -6,6 +6,9 @@ import os
 import pathlib
 import platform
 import traceback
+import base64
+import urllib.request
+import urllib.error
 import chess
 import chess.engine
 import chess.pgn
@@ -35,6 +38,54 @@ def save(data):
     temp = ROOT / "score.json.tmp"
     temp.write_text(json.dumps(data, indent=2, default=str), encoding="utf8")
     temp.replace(ROOT / "score.json")
+
+def publish(data):
+    """Commit a verified, readable, current status to the repository while still playing."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    branch = os.environ.get("GITHUB_REF_NAME", "")
+    if not token or not repo or not branch:
+        log("LIVE_PUBLISH_NOT_CONFIGURED")
+        return
+    path = "experiments/multipv_live_score.json"
+    status = {
+        "event": "Stockfish 17.1 depth 1, 1024 threads, default Hash, Syzygy 5-men",
+        "run_id": os.getenv("GITHUB_RUN_ID"),
+        "state": data.get("status"),
+        "score": data.get("score", {}),
+        "current": data.get("current"),
+        "last_completed_game": (data.get("games") or [None])[-1],
+        "errors": data.get("errors", []),
+        "settings": data.get("settings", {}),
+        "updated_utc": dt.datetime.now(dt.timezone.utc).isoformat()
+    }
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    headers = {
+        "Authorization": "Bearer " + token,
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "Stockfish-MultiPV-Screening",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+    try:
+        req = urllib.request.Request(url + "?ref=" + branch, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            sha = json.load(resp)["sha"]
+        body = json.dumps({
+            "message": f"Score: MPV1 {status['score'].get('MPV1_wins', 0)} - "
+                       f"draws {status['score'].get('draws', 0)} - "
+                       f"MPV4 {status['score'].get('MPV4_wins', 0)}",
+            "content": base64.b64encode((json.dumps(status, indent=2) + "\\n").encode()).decode(),
+            "sha": sha, "branch": branch
+        }).encode()
+        req = urllib.request.Request(url, data=body, headers={
+            **headers, "Content-Type": "application/json"}, method="PUT")
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            code = resp.status
+        log("PUBLISHED_LIVE_SCORE", code, "games", status["score"].get("completed"),
+            "game", (status["current"] or {}).get("game"),
+            "ply", (status["current"] or {}).get("ply"))
+    except Exception as exc:
+        log("PUBLISH_ERROR", repr(exc))
 
 def check_tb():
     a, b = TB.split(":")
@@ -72,7 +123,7 @@ def main():
             # Keep the idle opponent at 1 thread to avoid >2048 simultaneous
             # threads on a 4-core hosted runner. Each actual depth-1 search
             # still runs at the requested 1024 Stockfish threads.
-            eng.configure({"Threads": 1, "SyzygyPath": TB,
+            eng.configure({"Threads": 1024, "SyzygyPath": TB,
                            "SyzygyProbeLimit": 5, "Syzygy50MoveRule": True,
                            "Skill Level": 20})
             if "SyzygyProbeDepth" in eng.options:
@@ -82,7 +133,7 @@ def main():
         data["status"] = "playing"
         save(data)
         pairings = [(opening, white) for opening in OPENINGS for white in (True, False)] * 5
-        active_thread_owner = None
+        publish(data)
         with (ROOT / "games.pgn").open("a", encoding="utf8", buffering=1) as fp:
             for num, (opening, pv4_white) in enumerate(pairings, 1):
                 played = data["score"]["completed"]
@@ -91,6 +142,7 @@ def main():
                     if mpv4_points <= played / 2:
                         data["status"] = "stopped_no_early_advantage"
                         save(data)
+                        publish(data)
                         log("SCREEN_STOP", played, "MPV4_points", mpv4_points)
                         break
                     log("SCREEN_CONTINUE", played, "MPV4_points", mpv4_points)
@@ -119,11 +171,6 @@ def main():
                         if board.is_game_over(claim_draw=True):
                             break
                         pv = 4 if (board.turn == chess.WHITE) == pv4_white else 1
-                        if active_thread_owner != pv:
-                            if active_thread_owner is not None:
-                                engines[active_thread_owner].configure({"Threads": 1})
-                            engines[pv].configure({"Threads": 1024})
-                            active_thread_owner = pv
                         info = engines[pv].analyse(
                             board, chess.engine.Limit(depth=1),
                             multipv=pv, game=num)
@@ -134,7 +181,11 @@ def main():
                             raise RuntimeError("Illegal move: " + move.uci())
                         node = node.add_variation(move)
                         board.push(move)
-                        if ply % 25 == 0:
+                        data["current"] = {"game": num, "ply": board.ply(),
+                                           "last_move": move.uci(), "fen": board.fen()}
+                        if ply == 0 or ply % 12 == 0:
+                            save(data)
+                            publish(data)
                             log("MOVE", num, "ply", board.ply(), "MPV", pv, move.uci())
                     if not board.is_game_over(claim_draw=True):
                         raise RuntimeError("No chess result in 650 plies; must replay")
@@ -154,6 +205,7 @@ def main():
                     fp.write(str(game) + "\n\n")
                     fp.flush()
                     save(data)
+                    publish(data)
                     log("GAME", num, "result", result, "SCORE",
                         json.dumps(data["score"]))
                 except Exception as exc:
@@ -161,12 +213,14 @@ def main():
                     data["errors"].append({
                         "game": num, "error": repr(exc), "fen": board.fen()})
                     save(data)
+                    publish(data)
                     log("TECHNICAL_ERROR_UNSCORED", repr(exc))
                     traceback.print_exc()
                     raise
             else:
                 data["status"] = "completed_100"
                 save(data)
+                publish(data)
         log("FINAL", data["status"], json.dumps(data["score"]))
     finally:
         for pv, eng in engines.items():
