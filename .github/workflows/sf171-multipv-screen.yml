@@ -1,0 +1,61 @@
+name: Stockfish 17.1 MultiPV 1 vs 4 (depth 1, 1024 threads)
+on:
+  push:
+    branches:
+      - experiments/sf171-multipv-screen-20261016
+    paths:
+      - experiments/sf171_multipv_screen.py
+      - .github/workflows/sf171-multipv-screen.yml
+  workflow_dispatch:
+
+jobs:
+  match:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install chess protocol and game adjudication
+        run: python -m pip install python-chess==1.999
+      - name: Build official Stockfish 17.1
+        shell: bash
+        run: |
+          git clone --depth 1 --branch sf_17.1 https://github.com/official-stockfish/Stockfish.git /tmp/Stockfish
+          make -C /tmp/Stockfish/src -j4 build ARCH=x86-64
+          /tmp/Stockfish/src/stockfish --help || true
+      - name: Download complete 3–5-men Syzygy WDL and DTZ
+        shell: bash
+        run: |
+          mkdir -p /tmp/tbs
+          cd /tmp/tbs
+          wget --no-verbose -r -nH --cut-dirs=2 --no-parent --reject="index.html*" -e robots=off https://tablebase.lichess.ovh/tables/standard/3-4-5-wdl/
+          wget --no-verbose -r -nH --cut-dirs=2 --no-parent --reject="index.html*" -e robots=off https://tablebase.lichess.ovh/tables/standard/3-4-5-dtz/
+          test "$(find 3-4-5-wdl -type f -name '*.rtbw' | wc -l)" = 145
+          test "$(find 3-4-5-dtz -type f -name '*.rtbz' | wc -l)" = 145
+          du -sh 3-4-5-wdl 3-4-5-dtz
+      - name: Verify host CPU and resource limits
+        shell: bash
+        run: |
+          nproc
+          free -h
+          cat /sys/fs/cgroup/pids.max || true
+          cat /sys/fs/cgroup/cpu.max || true
+          /tmp/Stockfish/src/stockfish <<'EOF'
+          uci
+          quit
+          EOF
+      - name: Play controlled paired opening games
+        run: python -u experiments/sf171_multipv_screen.py
+        timeout-minutes: 200
+      - name: Upload scored PGNs and screening result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sf171-depth1-1024threads-mpv1-v-mpv4
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30
