@@ -1,31 +1,22 @@
 {
-  "event": "Stockfish 17.1 depth 1, 1024 threads, default Hash, Syzygy 5-men",
-  "run_id": "38878898181",
-  "state": "playing",
+  "event": "Stockfish 17.1 (depth 1, Threads 1024, MultiPV 1 vs 4, default Hash 16 MB, five-piece Syzygy)",
+  "state": "halted_before_first_legal_result",
   "score": {
     "MPV1_wins": 0,
     "draws": 0,
     "MPV4_wins": 0,
     "completed": 0
   },
-  "current": null,
-  "last_completed_game": null,
-  "errors": [],
-  "settings": {
-    "Stockfish": "17.1",
-    "Threads": 1024,
-    "depth": 1,
-    "MultiPV": [
-      1,
-      4
-    ],
-    "Hash": "UCI default, untouched",
-    "SyzygyProbeLimit": 5,
-    "screen_at": [
-      20,
-      40
-    ],
-    "maximum_games": 100
+  "latest_run": {
+    "id": 38878898181,
+    "status": "failed",
+    "reason": "GitHub Actions runner received a shutdown signal (exit code 143) during Game 1, before any legal result",
+    "confirmed_from": "2026-10-16 09:14:46 UTC workflow job log"
   },
-  "updated_utc": "2026-10-16T09:14:19.515218+00:00"
-}\n
+  "previous_runs": [
+    38877327495,
+    38878869834
+  ],
+  "technical_errors_counted_as_results": 0,
+  "note": "Scoreboard manually verified from completed GitHub job logs; no wins, losses or draws occurred. The current source runner cannot finish games with 1024 threads on the 4-vCPU GitHub hosted runner."
+}
